@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"mvp-vpn-lite/internal/quictransport"
+	"mvp-vpn-lite/internal/tun"
 )
 
 func main() {
@@ -22,14 +23,31 @@ func main() {
 	identifier := flag.Uint("identifier", 0x4d56, "ICMP identifier")
 	payload := flag.String("payload", "mvp-vpn-lite", "ICMP echo payload")
 	timeout := flag.Duration("timeout", 5*time.Second, "per-request timeout")
+	tunMode := flag.Bool("tun", false, "connect a local TUN device to the QUIC paths")
+	tunName := flag.String("tun-name", tun.DefaultDeviceName, "TUN device name for -tun mode")
 	flag.Parse()
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if *tunMode {
+		cfg := quictransport.TUNClientConfig{
+			Server0:    *server0,
+			Server1:    *server1,
+			DeviceName: *tunName,
+		}
+
+		log.Printf("starting QUIC TUN client: server0=%s server1=%s tun-name=%s", cfg.Server0, cfg.Server1, cfg.DeviceName)
+
+		if err := quictransport.RunTUNClient(ctx, cfg); err != nil && !errors.Is(err, context.Canceled) {
+			log.Fatal(err)
+		}
+		return
+	}
 
 	if *identifier > 0xffff {
 		log.Fatalf("identifier must fit in uint16: %d", *identifier)
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	cfg := quictransport.ClientConfig{
 		Server0:        *server0,

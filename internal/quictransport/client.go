@@ -6,12 +6,16 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"os"
+	"sync"
 	"time"
 
 	"mvp-vpn-lite/internal/multipath"
 	"mvp-vpn-lite/internal/packet"
+	"mvp-vpn-lite/internal/tun"
 
 	"github.com/quic-go/quic-go"
 )
@@ -29,6 +33,14 @@ type ClientConfig struct {
 	Count          int
 	Payload        []byte
 	RequestTimeout time.Duration
+}
+
+// TUNClientConfig contains the remote addresses and local TUN device used by
+// the packet pump.
+type TUNClientConfig struct {
+	Server0    string
+	Server1    string
+	DeviceName string
 }
 
 // RunClient connects to the configured QUIC paths and sends demo ICMP echo
@@ -52,7 +64,7 @@ func RunClient(ctx context.Context, cfg ClientConfig) error {
 		cfg.RequestTimeout = defaultClientRequestTimeout
 	}
 
-	paths, err := dialClientPaths(ctx, cfg)
+	paths, err := dialClientPaths(ctx, cfg.Server0, cfg.Server1)
 	if err != nil {
 		return err
 	}
@@ -97,14 +109,47 @@ func RunClient(ctx context.Context, cfg ClientConfig) error {
 	return nil
 }
 
+// RunTUNClient connects a Linux TUN interface to the configured QUIC paths.
+func RunTUNClient(ctx context.Context, cfg TUNClientConfig) error {
+	if cfg.Server0 == "" && cfg.Server1 == "" {
+		return errors.New("at least one QUIC server address is required")
+	}
+
+	device, err := tun.Open(cfg.DeviceName)
+	if err != nil {
+		return err
+	}
+	defer device.Close()
+	log.Printf("opened TUN device %s", device.Name())
+
+	paths, err := dialClientPaths(ctx, cfg.Server0, cfg.Server1)
+	if err != nil {
+		return err
+	}
+	defer closeClientPaths(paths)
+
+	scheduler, err := multipath.NewRoundRobin(len(paths))
+	if err != nil {
+		return err
+	}
+
+	return pumpTUN(ctx, device, paths, scheduler)
+}
+
 type clientPath struct {
 	id      int
 	address string
 	conn    *quic.Conn
-	stream  *quic.Stream
+	stream  clientStream
 }
 
-func dialClientPaths(ctx context.Context, cfg ClientConfig) ([]clientPath, error) {
+type clientStream interface {
+	io.ReadWriter
+	Close() error
+	SetDeadline(time.Time) error
+}
+
+func dialClientPaths(ctx context.Context, server0, server1 string) ([]clientPath, error) {
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: true, // demo server uses an ephemeral self-signed certificate
 		NextProtos:         []string{mvpQUICALPN},
@@ -112,11 +157,11 @@ func dialClientPaths(ctx context.Context, cfg ClientConfig) ([]clientPath, error
 	}
 
 	var paths []clientPath
-	if cfg.Server0 != "" {
-		paths = append(paths, clientPath{id: 0, address: cfg.Server0})
+	if server0 != "" {
+		paths = append(paths, clientPath{id: 0, address: server0})
 	}
-	if cfg.Server1 != "" {
-		paths = append(paths, clientPath{id: 1, address: cfg.Server1})
+	if server1 != "" {
+		paths = append(paths, clientPath{id: 1, address: server1})
 	}
 
 	for i := range paths {
@@ -139,6 +184,94 @@ func dialClientPaths(ctx context.Context, cfg ClientConfig) ([]clientPath, error
 	}
 
 	return paths, nil
+}
+
+type packetDevice interface {
+	Read([]byte) (int, error)
+	Write([]byte) (int, error)
+	Close() error
+}
+
+type pathScheduler interface {
+	Next() int
+}
+
+func pumpTUN(ctx context.Context, device packetDevice, paths []clientPath, scheduler pathScheduler) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, len(paths)+1)
+
+	go func() {
+		<-ctx.Done()
+		_ = device.Close()
+	}()
+
+	var deviceWriteMu sync.Mutex
+	for _, path := range paths {
+		go receivePathPackets(ctx, path, device, &deviceWriteMu, errCh)
+	}
+	go sendTUNPackets(ctx, device, paths, scheduler, errCh)
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-errCh:
+		cancel()
+		return err
+	}
+}
+
+func sendTUNPackets(ctx context.Context, device packetDevice, paths []clientPath, scheduler pathScheduler, errCh chan<- error) {
+	buffer := make([]byte, MaxFrameSize)
+	for {
+		n, err := device.Read(buffer)
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, os.ErrClosed) {
+				return
+			}
+			errCh <- fmt.Errorf("read TUN packet: %w", err)
+			return
+		}
+		if n == 0 {
+			continue
+		}
+
+		path := paths[scheduler.Next()]
+		packet := append([]byte(nil), buffer[:n]...)
+		if err := WriteFrame(path.stream, packet); err != nil {
+			errCh <- fmt.Errorf("path %d write TUN packet: %w", path.id, err)
+			return
+		}
+
+		log.Printf("path %d sent TUN packet length=%d", path.id, len(packet))
+	}
+}
+
+func receivePathPackets(ctx context.Context, path clientPath, device packetDevice, deviceWriteMu *sync.Mutex, errCh chan<- error) {
+	for {
+		rawPacket, err := ReadFrame(path.stream)
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, os.ErrClosed) {
+				return
+			}
+			errCh <- fmt.Errorf("path %d read packet: %w", path.id, err)
+			return
+		}
+
+		deviceWriteMu.Lock()
+		_, err = device.Write(rawPacket)
+		deviceWriteMu.Unlock()
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, os.ErrClosed) {
+				return
+			}
+			errCh <- fmt.Errorf("path %d write TUN packet: %w", path.id, err)
+			return
+		}
+
+		log.Printf("path %d received TUN packet length=%d", path.id, len(rawPacket))
+	}
 }
 
 func closeClientPaths(paths []clientPath) {

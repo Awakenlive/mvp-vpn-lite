@@ -1,7 +1,50 @@
 package main
 
-import "fmt"
+import (
+	"context"
+	"errors"
+	"flag"
+	"log"
+	"net"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"mvp-vpn-lite/internal/quictransport"
+)
 
 func main() {
-	fmt.Println("VPN client started")
+	server0 := flag.String("server0", "localhost:4433", "QUIC server address for path 0")
+	server1 := flag.String("server1", "localhost:4434", "QUIC server address for path 1")
+	virtualIP := flag.String("virtual-ip", "10.8.0.1", "virtual server IPv4 address")
+	clientIP := flag.String("client-ip", "10.8.0.2", "client tunnel IPv4 address")
+	count := flag.Int("count", 4, "number of demo ICMP echo requests to send")
+	identifier := flag.Uint("identifier", 0x4d56, "ICMP identifier")
+	payload := flag.String("payload", "mvp-vpn-lite", "ICMP echo payload")
+	timeout := flag.Duration("timeout", 5*time.Second, "per-request timeout")
+	flag.Parse()
+
+	if *identifier > 0xffff {
+		log.Fatalf("identifier must fit in uint16: %d", *identifier)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	cfg := quictransport.ClientConfig{
+		Server0:        *server0,
+		Server1:        *server1,
+		VirtualIP:      net.ParseIP(*virtualIP),
+		ClientIP:       net.ParseIP(*clientIP),
+		Identifier:     uint16(*identifier),
+		Count:          *count,
+		Payload:        []byte(*payload),
+		RequestTimeout: *timeout,
+	}
+
+	log.Printf("starting QUIC demo client: server0=%s server1=%s virtual-ip=%s client-ip=%s count=%d", cfg.Server0, cfg.Server1, cfg.VirtualIP, cfg.ClientIP, cfg.Count)
+
+	if err := quictransport.RunClient(ctx, cfg); err != nil && !errors.Is(err, context.Canceled) {
+		log.Fatal(err)
+	}
 }

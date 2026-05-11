@@ -1,7 +1,6 @@
 package packet
 
 import (
-	"encoding/binary"
 	"net"
 	"testing"
 )
@@ -91,35 +90,58 @@ func TestBuildICMPEchoReply(t *testing.T) {
 	}
 }
 
+func TestBuildICMPEchoRequest(t *testing.T) {
+	t.Parallel()
+
+	clientIP := net.IPv4(10, 8, 0, 2)
+	serverIP := net.IPv4(10, 8, 0, 1)
+	request, err := BuildICMPEchoRequest(clientIP, serverIP, 0xcafe, 3, []byte("demo"))
+	if err != nil {
+		t.Fatalf("BuildICMPEchoRequest() error = %v", err)
+	}
+
+	if Checksum(request[:20]) != 0 {
+		t.Fatalf("IPv4 checksum validation = %#04x, want 0", Checksum(request[:20]))
+	}
+
+	ipPacket, err := ParseIPv4Packet(request)
+	if err != nil {
+		t.Fatalf("ParseIPv4Packet(request) error = %v", err)
+	}
+	if !ipPacket.SourceIP.Equal(clientIP) {
+		t.Fatalf("request source = %s, want %s", ipPacket.SourceIP, clientIP)
+	}
+	if !ipPacket.DestinationIP.Equal(serverIP) {
+		t.Fatalf("request destination = %s, want %s", ipPacket.DestinationIP, serverIP)
+	}
+	if Checksum(ipPacket.Payload) != 0 {
+		t.Fatalf("ICMP checksum validation = %#04x, want 0", Checksum(ipPacket.Payload))
+	}
+
+	icmpPacket, err := ParseICMPPacket(ipPacket.Payload)
+	if err != nil {
+		t.Fatalf("ParseICMPPacket(request payload) error = %v", err)
+	}
+	if icmpPacket.Type != ICMPTypeEchoRequest {
+		t.Fatalf("ICMP type = %d, want %d", icmpPacket.Type, ICMPTypeEchoRequest)
+	}
+	if icmpPacket.Identifier != 0xcafe {
+		t.Fatalf("identifier = %#04x, want 0xcafe", icmpPacket.Identifier)
+	}
+	if icmpPacket.Sequence != 3 {
+		t.Fatalf("sequence = %d, want 3", icmpPacket.Sequence)
+	}
+	if string(icmpPacket.Payload) != "demo" {
+		t.Fatalf("payload = %q, want demo", icmpPacket.Payload)
+	}
+}
+
 func buildTestEchoRequest(t *testing.T, srcIP, dstIP net.IP, identifier, sequence uint16, payload []byte) []byte {
 	t.Helper()
 
-	srcIPv4 := srcIP.To4()
-	if srcIPv4 == nil {
-		t.Fatalf("source IP must be IPv4")
+	packet, err := BuildICMPEchoRequest(srcIP, dstIP, identifier, sequence, payload)
+	if err != nil {
+		t.Fatalf("BuildICMPEchoRequest() error = %v", err)
 	}
-	dstIPv4 := dstIP.To4()
-	if dstIPv4 == nil {
-		t.Fatalf("destination IP must be IPv4")
-	}
-
-	icmpPayload := make([]byte, 8+len(payload))
-	icmpPayload[0] = ICMPTypeEchoRequest
-	icmpPayload[1] = 0
-	binary.BigEndian.PutUint16(icmpPayload[4:6], identifier)
-	binary.BigEndian.PutUint16(icmpPayload[6:8], sequence)
-	copy(icmpPayload[8:], payload)
-	binary.BigEndian.PutUint16(icmpPayload[2:4], Checksum(icmpPayload))
-
-	packet := make([]byte, 20+len(icmpPayload))
-	packet[0] = 0x45
-	binary.BigEndian.PutUint16(packet[2:4], uint16(len(packet)))
-	packet[8] = 64
-	packet[9] = IPv4ProtocolICMP
-	copy(packet[12:16], srcIPv4)
-	copy(packet[16:20], dstIPv4)
-	binary.BigEndian.PutUint16(packet[10:12], Checksum(packet[:20]))
-	copy(packet[20:], icmpPayload)
-
 	return packet
 }

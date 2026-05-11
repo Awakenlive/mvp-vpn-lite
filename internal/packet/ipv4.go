@@ -68,6 +68,19 @@ func ParseIPv4Packet(data []byte) (*IPv4Packet, error) {
 	}, nil
 }
 
+// BuildICMPEchoRequest builds an IPv4 ICMP echo request packet.
+func BuildICMPEchoRequest(sourceIP, destinationIP net.IP, identifier, sequence uint16, payload []byte) ([]byte, error) {
+	icmpPayload := make([]byte, 8+len(payload))
+	icmpPayload[0] = ICMPTypeEchoRequest
+	icmpPayload[1] = 0
+	binary.BigEndian.PutUint16(icmpPayload[4:6], identifier)
+	binary.BigEndian.PutUint16(icmpPayload[6:8], sequence)
+	copy(icmpPayload[8:], payload)
+	binary.BigEndian.PutUint16(icmpPayload[2:4], Checksum(icmpPayload))
+
+	return buildIPv4ICMPPacket(sourceIP, destinationIP, icmpPayload)
+}
+
 // BuildICMPEchoReply builds an IPv4 ICMP echo reply for a raw echo request.
 func BuildICMPEchoReply(request []byte, virtualServerIP net.IP, clientIP net.IP) ([]byte, error) {
 	serverIPv4 := virtualServerIP.To4()
@@ -103,9 +116,22 @@ func BuildICMPEchoReply(request []byte, virtualServerIP net.IP, clientIP net.IP)
 	copy(icmpReply[8:], icmpPacket.Payload)
 	binary.BigEndian.PutUint16(icmpReply[2:4], Checksum(icmpReply))
 
-	totalLen := ipv4MinHeaderLen + len(icmpReply)
+	return buildIPv4ICMPPacket(serverIPv4, clientIPv4, icmpReply)
+}
+
+func buildIPv4ICMPPacket(sourceIP, destinationIP net.IP, icmpPayload []byte) ([]byte, error) {
+	sourceIPv4 := sourceIP.To4()
+	if sourceIPv4 == nil {
+		return nil, errors.New("source IP must be IPv4")
+	}
+	destinationIPv4 := destinationIP.To4()
+	if destinationIPv4 == nil {
+		return nil, errors.New("destination IP must be IPv4")
+	}
+
+	totalLen := ipv4MinHeaderLen + len(icmpPayload)
 	if totalLen > 0xffff {
-		return nil, errors.New("icmp echo reply too large for ipv4")
+		return nil, errors.New("icmp packet too large for ipv4")
 	}
 
 	reply := make([]byte, totalLen)
@@ -116,10 +142,10 @@ func BuildICMPEchoReply(request []byte, virtualServerIP net.IP, clientIP net.IP)
 	binary.BigEndian.PutUint16(reply[6:8], 0)
 	reply[8] = ipv4DefaultTTL
 	reply[9] = IPv4ProtocolICMP
-	copy(reply[12:16], serverIPv4)
-	copy(reply[16:20], clientIPv4)
+	copy(reply[12:16], sourceIPv4)
+	copy(reply[16:20], destinationIPv4)
 	binary.BigEndian.PutUint16(reply[10:12], Checksum(reply[:ipv4MinHeaderLen]))
-	copy(reply[ipv4MinHeaderLen:], icmpReply)
+	copy(reply[ipv4MinHeaderLen:], icmpPayload)
 
 	return reply, nil
 }

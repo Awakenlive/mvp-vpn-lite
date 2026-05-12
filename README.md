@@ -6,9 +6,10 @@ the client and server side.
 
 ## Current status
 
-Stage 6 is implemented: both client and server have Linux TUN modes, and the
-demo client/server still exist for quick socket-only checks. Packet counters and
-periodic stats logging are wired into demo and TUN paths.
+Stage 7 is implemented: both client and server have Linux TUN modes, and the
+helper scripts now support dry-run command checks plus optional server-side
+routes. The demo client/server still exist for quick socket-only checks. Packet
+counters and periodic stats logging are wired into demo and TUN paths.
 
 Implemented pieces:
 
@@ -17,7 +18,7 @@ Implemented pieces:
 - Demo server listening on one or two QUIC addresses.
 - Demo client sending synthetic ICMP echo requests without TUN.
 - Round-robin scheduling across available paths.
-- Linux TUN client/server modes and setup/cleanup helper scripts.
+- Linux TUN client/server modes and idempotent setup/cleanup helper scripts.
 - RX/TX/drop/error counters with `-stats-interval`.
 - Optional server TLS cert/key files and client CA verification.
 
@@ -81,6 +82,14 @@ On the server host, create and configure the server TUN device:
 sudo ./scripts/setup-server.sh
 ```
 
+The default server setup assigns `10.8.0.1/24` to `mvpvpns0`. If the server
+needs an explicit route back to a client-side or downstream network, pass it as
+`ROUTE`:
+
+```sh
+sudo ROUTE=10.8.0.2/32 ./scripts/setup-server.sh
+```
+
 Start the TUN server:
 
 ```sh
@@ -96,6 +105,10 @@ On the client host, create and configure the client TUN device:
 ```sh
 sudo ./scripts/setup-client.sh
 ```
+
+The client helper assigns `10.8.0.2/24` to `mvpvpn0` and routes `10.8.0.1/32`
+through it. Override `DEVICE`, `CLIENT_IP`, `PREFIX`, `MTU`, `ROUTE`, or
+`OWNER` as needed.
 
 Start the TUN client:
 
@@ -118,6 +131,16 @@ Clean up the device when finished:
 ```sh
 sudo ./scripts/cleanup-client.sh
 sudo ./scripts/cleanup-server.sh
+```
+
+To inspect the exact `ip` commands without root or without changing the host,
+run the helpers with `DRY_RUN=1`:
+
+```sh
+DRY_RUN=1 ./scripts/setup-server.sh
+DRY_RUN=1 ./scripts/setup-client.sh
+DRY_RUN=1 ./scripts/cleanup-client.sh
+DRY_RUN=1 ./scripts/cleanup-server.sh
 ```
 
 ## Useful flags
@@ -152,6 +175,7 @@ Client:
 
 ```sh
 GOCACHE=/tmp/mvp-vpn-lite-gocache GOMODCACHE=/tmp/mvp-vpn-lite-gomodcache go test ./...
+./scripts/check-tun-scripts.sh
 ```
 
 More details are in `docs/testing.md`.

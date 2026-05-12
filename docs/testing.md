@@ -4,9 +4,10 @@ Use a writable Go cache when running in restricted environments:
 
 ```sh
 GOCACHE=/tmp/mvp-vpn-lite-gocache GOMODCACHE=/tmp/mvp-vpn-lite-gomodcache go test ./...
+./scripts/check-tun-scripts.sh
 ```
 
-## What the tests cover
+## What the tests and checks cover
 
 - IPv4 checksum and packet parsing/building.
 - ICMP echo request/reply construction.
@@ -18,6 +19,7 @@ GOCACHE=/tmp/mvp-vpn-lite-gocache GOMODCACHE=/tmp/mvp-vpn-lite-gomodcache go tes
 - Server TUN session path selection and device forwarding helpers.
 - Packet stats counters and formatting.
 - TLS config loading for server cert/key files and client CA files.
+- TUN helper command rendering through `DRY_RUN=1`.
 
 ## Smoke test without TUN
 
@@ -74,11 +76,28 @@ sudo ./scripts/cleanup-client.sh
 
 ## TUN-to-TUN manual check
 
+The helper scripts support dry runs, which makes the route/device commands
+checkable without root:
+
+```sh
+DRY_RUN=1 ./scripts/setup-server.sh
+DRY_RUN=1 ./scripts/setup-client.sh
+DRY_RUN=1 ./scripts/cleanup-client.sh
+DRY_RUN=1 ./scripts/cleanup-server.sh
+```
+
 On the server host:
 
 ```sh
 sudo ./scripts/setup-server.sh
 go run ./cmd/server -tun -tun-name mvpvpns0 -listen0 127.0.0.1:44433 -listen1 127.0.0.1:44434
+```
+
+If the server needs an explicit return route, pass it through `ROUTE`, for
+example:
+
+```sh
+sudo ROUTE=10.8.0.2/32 ./scripts/setup-server.sh
 ```
 
 On the client host:
@@ -102,4 +121,4 @@ sudo ./scripts/cleanup-server.sh
   root or `CAP_NET_ADMIN`.
 - No network fault injection or path failure recovery tests yet.
 - No automated full TUN-to-TUN integration test yet.
-- No routing, NAT, or packet policy tests yet.
+- No NAT or packet policy tests yet.

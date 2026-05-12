@@ -61,8 +61,10 @@ stats.
 
 In TUN mode, the QUIC frame payload is treated as a raw IPv4 packet. The client
 and server do not inspect or rewrite the packet before writing it to their local
-TUN device. Any packet filtering, routing, NAT, or policy enforcement is outside
-the current MVP.
+TUN device. The helper scripts configure the local TUN addresses and routes
+needed for the default `10.8.0.1`/`10.8.0.2` check, including an optional
+server-side route. Packet filtering, NAT, and policy enforcement are outside the
+current MVP.
 
 ## Multipath behavior
 

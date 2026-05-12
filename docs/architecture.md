@@ -31,6 +31,12 @@ connected QUIC paths.
 Wraps Linux TUN creation/opening. The device uses `IFF_TUN | IFF_NO_PI`, so the
 packet stream contains raw IP packets without a packet-info prefix.
 
+`scripts`
+
+Provides idempotent Linux TUN setup/cleanup helpers for client and server
+hosts. The helpers can print their `iproute2` commands with `DRY_RUN=1`, and the
+server helper can install an optional route through the server TUN device.
+
 `internal/stats`
 
 Tracks RX/TX packet and byte counts plus drops and errors. The command line

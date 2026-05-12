@@ -31,6 +31,8 @@ const mvpQUICALPN = "mvp-vpn-lite"
 type ServerConfig struct {
 	Listen0       string
 	Listen1       string
+	TLSCertFile   string
+	TLSKeyFile    string
 	VirtualIP     net.IP
 	ClientIP      net.IP
 	StatsInterval time.Duration
@@ -53,7 +55,7 @@ func RunServer(ctx context.Context, cfg ServerConfig) error {
 		}
 	}
 
-	tlsConfig, err := generateSelfSignedTLSConfig()
+	tlsConfig, err := serverTLSConfig(cfg.TLSCertFile, cfg.TLSKeyFile)
 	if err != nil {
 		return err
 	}

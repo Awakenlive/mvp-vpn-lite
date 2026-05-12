@@ -96,8 +96,8 @@ TUN file descriptor and QUIC listeners are closed to unblock pending reads.
 
 ## Security notes
 
-This is an MVP transport demo, not production VPN software. The demo server
-generates an ephemeral self-signed certificate at startup, and the client skips
-certificate verification. Production use would need authenticated peers,
-stable certificates or another trust model, replay/abuse controls, and broader
-packet policy.
+This is an MVP transport demo, not production VPN software. The server can load
+a configured certificate/key pair and the client can verify a configured CA
+certificate. If no CA is configured, the client falls back to insecure demo mode
+for the server's ephemeral self-signed certificate. Production use would still
+need authenticated peers, replay/abuse controls, and broader packet policy.

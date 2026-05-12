@@ -7,8 +7,10 @@ sequence of length-prefixed raw IPv4 packets.
 
 - ALPN: `mvp-vpn-lite`
 - TLS: TLS 1.3
-- Server certificate: ephemeral self-signed certificate generated at startup
-- Client verification: disabled for the demo
+- Server certificate: either configured with `-tls-cert`/`-tls-key`, or an
+  ephemeral self-signed certificate generated at startup
+- Client verification: enabled when `-ca-cert` is provided; otherwise disabled
+  for local demo mode
 
 Each configured path is a separate QUIC connection. The client opens one stream
 on each connection and sends packet frames on that stream. In server TUN mode,

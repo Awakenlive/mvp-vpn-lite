@@ -17,6 +17,7 @@ GOCACHE=/tmp/mvp-vpn-lite-gocache GOMODCACHE=/tmp/mvp-vpn-lite-gomodcache go tes
 - Client path failover when a TUN write hits a failed QUIC stream.
 - Server TUN session path selection and device forwarding helpers.
 - Packet stats counters and formatting.
+- TLS config loading for server cert/key files and client CA files.
 
 ## Smoke test without TUN
 

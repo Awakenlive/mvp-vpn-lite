@@ -19,12 +19,13 @@ Implemented pieces:
 - Round-robin scheduling across available paths.
 - Linux TUN client/server modes and setup/cleanup helper scripts.
 - RX/TX/drop/error counters with `-stats-interval`.
+- Optional server TLS cert/key files and client CA verification.
 
 Main limitations:
 
 - Linux only for real TUN mode.
-- Demo TLS uses an ephemeral self-signed certificate and client-side
-  `InsecureSkipVerify`.
+- When `-ca-cert` is not provided, the client uses demo TLS mode and skips
+  certificate verification for the server's ephemeral self-signed certificate.
 - The default server mode still answers IPv4 ICMP echo packets itself.
 - TUN server mode forwards raw IPv4 packets to the server TUN device, but there
   is no authentication, routing policy, or NAT management yet.
@@ -52,6 +53,25 @@ GOCACHE=/tmp/mvp-vpn-lite-gocache GOMODCACHE=/tmp/mvp-vpn-lite-gomodcache \
 ```
 
 The client should log four echo replies, alternating between path 0 and path 1.
+
+## TLS trust
+
+By default the server generates an ephemeral self-signed certificate and the
+client accepts it for local demos. For a trusted run, start the server with a
+certificate/key pair and pass the issuing CA certificate, or the self-signed
+server certificate, to the client:
+
+```sh
+go run ./cmd/server \
+  -tls-cert ./certs/server.crt \
+  -tls-key ./certs/server.key
+```
+
+```sh
+go run ./cmd/client \
+  -ca-cert ./certs/server.crt \
+  -server-name localhost
+```
 
 ## TUN-to-TUN mode
 
@@ -106,6 +126,8 @@ Server:
 
 - `-listen0`, `-listen1`: QUIC listen addresses. Leave either empty to use one
   path.
+- `-tls-cert`, `-tls-key`: PEM certificate and private key files. If omitted,
+  the server generates an ephemeral demo certificate.
 - `-virtual-ip`: virtual server IPv4 address, default `10.8.0.1`.
 - `-client-ip`: client tunnel IPv4 address, default `10.8.0.2`.
 - `-tun`: enable server TUN packet pump mode.
@@ -117,6 +139,9 @@ Client:
 
 - `-server0`, `-server1`: QUIC server addresses. Leave either empty to use one
   path.
+- `-ca-cert`: PEM CA/server certificate used to verify the QUIC server. If
+  omitted, the client uses demo insecure TLS.
+- `-server-name`: TLS server name override for certificate verification.
 - `-count`: number of synthetic echo requests in non-TUN mode.
 - `-tun`: enable TUN packet pump mode.
 - `-tun-name`: TUN device name, default `mvpvpn0`.

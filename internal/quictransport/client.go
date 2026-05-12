@@ -28,6 +28,8 @@ const defaultClientRequestTimeout = 5 * time.Second
 type ClientConfig struct {
 	Server0        string
 	Server1        string
+	CAFile         string
+	ServerName     string
 	VirtualIP      net.IP
 	ClientIP       net.IP
 	Identifier     uint16
@@ -42,6 +44,8 @@ type ClientConfig struct {
 type TUNClientConfig struct {
 	Server0       string
 	Server1       string
+	CAFile        string
+	ServerName    string
 	DeviceName    string
 	StatsInterval time.Duration
 }
@@ -67,7 +71,12 @@ func RunClient(ctx context.Context, cfg ClientConfig) error {
 		cfg.RequestTimeout = defaultClientRequestTimeout
 	}
 
-	paths, err := dialClientPaths(ctx, cfg.Server0, cfg.Server1)
+	tlsConfig, err := clientTLSConfig(cfg.CAFile, cfg.ServerName)
+	if err != nil {
+		return err
+	}
+
+	paths, err := dialClientPaths(ctx, cfg.Server0, cfg.Server1, tlsConfig)
 	if err != nil {
 		return err
 	}
@@ -140,7 +149,12 @@ func RunTUNClient(ctx context.Context, cfg TUNClientConfig) error {
 	defer device.Close()
 	log.Printf("opened TUN device %s", device.Name())
 
-	paths, err := dialClientPaths(ctx, cfg.Server0, cfg.Server1)
+	tlsConfig, err := clientTLSConfig(cfg.CAFile, cfg.ServerName)
+	if err != nil {
+		return err
+	}
+
+	paths, err := dialClientPaths(ctx, cfg.Server0, cfg.Server1, tlsConfig)
 	if err != nil {
 		return err
 	}
@@ -170,13 +184,7 @@ type clientStream interface {
 	SetDeadline(time.Time) error
 }
 
-func dialClientPaths(ctx context.Context, server0, server1 string) ([]clientPath, error) {
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true, // demo server uses an ephemeral self-signed certificate
-		NextProtos:         []string{mvpQUICALPN},
-		MinVersion:         tls.VersionTLS13,
-	}
-
+func dialClientPaths(ctx context.Context, server0, server1 string, tlsConfig *tls.Config) ([]clientPath, error) {
 	var paths []clientPath
 	if server0 != "" {
 		paths = append(paths, clientPath{id: 0, address: server0})

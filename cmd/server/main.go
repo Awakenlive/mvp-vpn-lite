@@ -17,6 +17,8 @@ import (
 func main() {
 	listen0 := flag.String("listen0", ":4433", "QUIC listen address for path 0")
 	listen1 := flag.String("listen1", ":4434", "QUIC listen address for path 1")
+	tlsCert := flag.String("tls-cert", "", "PEM TLS certificate file; empty generates an ephemeral demo certificate")
+	tlsKey := flag.String("tls-key", "", "PEM TLS private key file; required with -tls-cert")
 	virtualIP := flag.String("virtual-ip", "10.8.0.1", "virtual server IPv4 address")
 	clientIP := flag.String("client-ip", "10.8.0.2", "client tunnel IPv4 address")
 	statsInterval := flag.Duration("stats-interval", 10*time.Second, "stats log interval; 0 disables periodic stats")
@@ -30,6 +32,8 @@ func main() {
 	cfg := quictransport.ServerConfig{
 		Listen0:       *listen0,
 		Listen1:       *listen1,
+		TLSCertFile:   *tlsCert,
+		TLSKeyFile:    *tlsKey,
 		VirtualIP:     net.ParseIP(*virtualIP),
 		ClientIP:      net.ParseIP(*clientIP),
 		StatsInterval: *statsInterval,

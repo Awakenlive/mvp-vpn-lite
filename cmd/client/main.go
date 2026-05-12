@@ -17,6 +17,8 @@ import (
 func main() {
 	server0 := flag.String("server0", "localhost:4433", "QUIC server address for path 0")
 	server1 := flag.String("server1", "localhost:4434", "QUIC server address for path 1")
+	caCert := flag.String("ca-cert", "", "PEM CA/server certificate used to verify the QUIC server; empty uses demo insecure TLS")
+	serverName := flag.String("server-name", "", "TLS server name override for certificate verification")
 	virtualIP := flag.String("virtual-ip", "10.8.0.1", "virtual server IPv4 address")
 	clientIP := flag.String("client-ip", "10.8.0.2", "client tunnel IPv4 address")
 	count := flag.Int("count", 4, "number of demo ICMP echo requests to send")
@@ -35,6 +37,8 @@ func main() {
 		cfg := quictransport.TUNClientConfig{
 			Server0:       *server0,
 			Server1:       *server1,
+			CAFile:        *caCert,
+			ServerName:    *serverName,
 			DeviceName:    *tunName,
 			StatsInterval: *statsInterval,
 		}
@@ -54,6 +58,8 @@ func main() {
 	cfg := quictransport.ClientConfig{
 		Server0:        *server0,
 		Server1:        *server1,
+		CAFile:         *caCert,
+		ServerName:     *serverName,
 		VirtualIP:      net.ParseIP(*virtualIP),
 		ClientIP:       net.ParseIP(*clientIP),
 		Identifier:     uint16(*identifier),

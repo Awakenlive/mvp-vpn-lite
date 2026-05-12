@@ -15,6 +15,7 @@ import (
 
 	"mvp-vpn-lite/internal/multipath"
 	"mvp-vpn-lite/internal/packet"
+	"mvp-vpn-lite/internal/stats"
 	"mvp-vpn-lite/internal/tun"
 
 	"github.com/quic-go/quic-go"
@@ -33,14 +34,16 @@ type ClientConfig struct {
 	Count          int
 	Payload        []byte
 	RequestTimeout time.Duration
+	StatsInterval  time.Duration
 }
 
 // TUNClientConfig contains the remote addresses and local TUN device used by
 // the packet pump.
 type TUNClientConfig struct {
-	Server0    string
-	Server1    string
-	DeviceName string
+	Server0       string
+	Server1       string
+	DeviceName    string
+	StatsInterval time.Duration
 }
 
 // RunClient connects to the configured QUIC paths and sends demo ICMP echo
@@ -75,6 +78,14 @@ func RunClient(ctx context.Context, cfg ClientConfig) error {
 		return err
 	}
 
+	var counters stats.Counters
+	ctx, cancelStats := context.WithCancel(ctx)
+	defer cancelStats()
+	go stats.LogEvery(ctx, cfg.StatsInterval, &counters, log.Printf)
+	defer func() {
+		log.Printf("stats final: %s", counters.Snapshot())
+	}()
+
 	payload := append([]byte(nil), cfg.Payload...)
 	for i := 0; i < cfg.Count; i++ {
 		path := paths[scheduler.Next()]
@@ -86,20 +97,27 @@ func RunClient(ctx context.Context, cfg ClientConfig) error {
 		}
 
 		if err := path.stream.SetDeadline(time.Now().Add(cfg.RequestTimeout)); err != nil {
+			counters.AddError()
 			return fmt.Errorf("path %d set deadline: %w", path.id, err)
 		}
 		if err := WriteFrame(path.stream, request); err != nil {
+			counters.AddError()
 			return fmt.Errorf("path %d write request: %w", path.id, err)
 		}
+		counters.AddTX(len(request))
 
 		reply, err := ReadFrame(path.stream)
 		if err != nil {
+			counters.AddError()
 			return fmt.Errorf("path %d read reply: %w", path.id, err)
 		}
+		counters.AddRX(len(reply))
 		if err := validateEchoReply(reply, virtualIPv4, clientIPv4, cfg.Identifier, sequence, payload); err != nil {
+			counters.AddError()
 			return fmt.Errorf("path %d validate reply: %w", path.id, err)
 		}
 		if err := path.stream.SetDeadline(time.Time{}); err != nil {
+			counters.AddError()
 			return fmt.Errorf("path %d clear deadline: %w", path.id, err)
 		}
 
@@ -133,7 +151,15 @@ func RunTUNClient(ctx context.Context, cfg TUNClientConfig) error {
 		return err
 	}
 
-	return pumpTUN(ctx, device, paths, scheduler)
+	var counters stats.Counters
+	ctx, cancelStats := context.WithCancel(ctx)
+	defer cancelStats()
+	go stats.LogEvery(ctx, cfg.StatsInterval, &counters, log.Printf)
+	defer func() {
+		log.Printf("stats final: %s", counters.Snapshot())
+	}()
+
+	return pumpTUN(ctx, device, paths, scheduler, &counters)
 }
 
 type clientPath struct {
@@ -196,7 +222,7 @@ type pathScheduler interface {
 	Next() int
 }
 
-func pumpTUN(ctx context.Context, device packetDevice, paths []clientPath, scheduler pathScheduler) error {
+func pumpTUN(ctx context.Context, device packetDevice, paths []clientPath, scheduler pathScheduler, counters *stats.Counters) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -209,9 +235,9 @@ func pumpTUN(ctx context.Context, device packetDevice, paths []clientPath, sched
 
 	var deviceWriteMu sync.Mutex
 	for _, path := range paths {
-		go receivePathPackets(ctx, path, device, &deviceWriteMu, errCh)
+		go receivePathPackets(ctx, path, device, &deviceWriteMu, counters, errCh)
 	}
-	go sendTUNPackets(ctx, device, paths, scheduler, errCh)
+	go sendTUNPackets(ctx, device, paths, scheduler, counters, errCh)
 
 	select {
 	case <-ctx.Done():
@@ -222,7 +248,7 @@ func pumpTUN(ctx context.Context, device packetDevice, paths []clientPath, sched
 	}
 }
 
-func sendTUNPackets(ctx context.Context, device packetDevice, paths []clientPath, scheduler pathScheduler, errCh chan<- error) {
+func sendTUNPackets(ctx context.Context, device packetDevice, paths []clientPath, scheduler pathScheduler, counters *stats.Counters, errCh chan<- error) {
 	buffer := make([]byte, MaxFrameSize)
 	for {
 		n, err := device.Read(buffer)
@@ -230,6 +256,7 @@ func sendTUNPackets(ctx context.Context, device packetDevice, paths []clientPath
 			if ctx.Err() != nil || errors.Is(err, os.ErrClosed) {
 				return
 			}
+			counters.AddError()
 			errCh <- fmt.Errorf("read TUN packet: %w", err)
 			return
 		}
@@ -240,21 +267,24 @@ func sendTUNPackets(ctx context.Context, device packetDevice, paths []clientPath
 		path := paths[scheduler.Next()]
 		packet := append([]byte(nil), buffer[:n]...)
 		if err := WriteFrame(path.stream, packet); err != nil {
+			counters.AddError()
 			errCh <- fmt.Errorf("path %d write TUN packet: %w", path.id, err)
 			return
 		}
+		counters.AddTX(len(packet))
 
 		log.Printf("path %d sent TUN packet length=%d", path.id, len(packet))
 	}
 }
 
-func receivePathPackets(ctx context.Context, path clientPath, device packetDevice, deviceWriteMu *sync.Mutex, errCh chan<- error) {
+func receivePathPackets(ctx context.Context, path clientPath, device packetDevice, deviceWriteMu *sync.Mutex, counters *stats.Counters, errCh chan<- error) {
 	for {
 		rawPacket, err := ReadFrame(path.stream)
 		if err != nil {
-			if ctx.Err() != nil || errors.Is(err, os.ErrClosed) {
+			if ctx.Err() != nil || errors.Is(err, os.ErrClosed) || isGracefulStreamEnd(err) {
 				return
 			}
+			counters.AddError()
 			errCh <- fmt.Errorf("path %d read packet: %w", path.id, err)
 			return
 		}
@@ -266,9 +296,11 @@ func receivePathPackets(ctx context.Context, path clientPath, device packetDevic
 			if ctx.Err() != nil || errors.Is(err, os.ErrClosed) {
 				return
 			}
+			counters.AddError()
 			errCh <- fmt.Errorf("path %d write TUN packet: %w", path.id, err)
 			return
 		}
+		counters.AddRX(len(rawPacket))
 
 		log.Printf("path %d received TUN packet length=%d", path.id, len(rawPacket))
 	}

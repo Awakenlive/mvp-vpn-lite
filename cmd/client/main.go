@@ -23,6 +23,7 @@ func main() {
 	identifier := flag.Uint("identifier", 0x4d56, "ICMP identifier")
 	payload := flag.String("payload", "mvp-vpn-lite", "ICMP echo payload")
 	timeout := flag.Duration("timeout", 5*time.Second, "per-request timeout")
+	statsInterval := flag.Duration("stats-interval", 10*time.Second, "stats log interval; 0 disables periodic stats")
 	tunMode := flag.Bool("tun", false, "connect a local TUN device to the QUIC paths")
 	tunName := flag.String("tun-name", tun.DefaultDeviceName, "TUN device name for -tun mode")
 	flag.Parse()
@@ -32,9 +33,10 @@ func main() {
 
 	if *tunMode {
 		cfg := quictransport.TUNClientConfig{
-			Server0:    *server0,
-			Server1:    *server1,
-			DeviceName: *tunName,
+			Server0:       *server0,
+			Server1:       *server1,
+			DeviceName:    *tunName,
+			StatsInterval: *statsInterval,
 		}
 
 		log.Printf("starting QUIC TUN client: server0=%s server1=%s tun-name=%s", cfg.Server0, cfg.Server1, cfg.DeviceName)
@@ -58,6 +60,7 @@ func main() {
 		Count:          *count,
 		Payload:        []byte(*payload),
 		RequestTimeout: *timeout,
+		StatsInterval:  *statsInterval,
 	}
 
 	log.Printf("starting QUIC demo client: server0=%s server1=%s virtual-ip=%s client-ip=%s count=%d", cfg.Server0, cfg.Server1, cfg.VirtualIP, cfg.ClientIP, cfg.Count)

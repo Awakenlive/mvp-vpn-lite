@@ -9,6 +9,9 @@ const (
 	// DefaultDeviceName is the device name used by the client setup scripts.
 	DefaultDeviceName = "mvpvpn0"
 
+	// DefaultServerDeviceName is the device name used by the server setup scripts.
+	DefaultServerDeviceName = "mvpvpns0"
+
 	// DefaultMTU leaves room for QUIC/UDP/IP overhead on common Ethernet links.
 	DefaultMTU = 1400
 )

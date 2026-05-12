@@ -3,6 +3,8 @@ package quictransport
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"net"
 	"os"
 	"sync"
@@ -11,6 +13,9 @@ import (
 
 	"mvp-vpn-lite/internal/multipath"
 	"mvp-vpn-lite/internal/packet"
+	"mvp-vpn-lite/internal/stats"
+
+	"github.com/quic-go/quic-go"
 )
 
 func TestValidateEchoReply(t *testing.T) {
@@ -69,11 +74,12 @@ func TestSendTUNPacketsUsesRoundRobinPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRoundRobin() error = %v", err)
 	}
+	var counters stats.Counters
 
 	sendTUNPackets(ctx, device, []clientPath{
 		{id: 0, stream: stream0},
 		{id: 1, stream: stream1},
-	}, scheduler, make(chan error, 1))
+	}, scheduler, &counters, make(chan error, 1))
 
 	got0, err := ReadFrame(stream0)
 	if err != nil {
@@ -89,6 +95,9 @@ func TestSendTUNPacketsUsesRoundRobinPaths(t *testing.T) {
 	if string(got1) != "packet-1" {
 		t.Fatalf("stream1 packet = %q, want packet-1", got1)
 	}
+	if snapshot := counters.Snapshot(); snapshot.TXPackets != 2 || snapshot.TXBytes != 16 {
+		t.Fatalf("TX stats = %s, want 2 packets/16 bytes", snapshot)
+	}
 }
 
 func TestReceivePathPacketsWritesToTUNDevice(t *testing.T) {
@@ -100,8 +109,19 @@ func TestReceivePathPacketsWritesToTUNDevice(t *testing.T) {
 	}
 	device := &scriptedDevice{}
 	errCh := make(chan error, 1)
+	var counters stats.Counters
 
-	receivePathPackets(context.Background(), clientPath{id: 0, stream: stream}, device, &sync.Mutex{}, errCh)
+	done := make(chan struct{})
+	go func() {
+		receivePathPackets(context.Background(), clientPath{id: 0, stream: stream}, device, &sync.Mutex{}, &counters, errCh)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("receivePathPackets() did not return after graceful EOF")
+	}
 
 	writes := device.Writes()
 	if len(writes) != 1 {
@@ -110,9 +130,28 @@ func TestReceivePathPacketsWritesToTUNDevice(t *testing.T) {
 	if string(writes[0]) != "reply" {
 		t.Fatalf("device write = %q, want reply", writes[0])
 	}
+	if snapshot := counters.Snapshot(); snapshot.RXPackets != 1 || snapshot.RXBytes != 5 {
+		t.Fatalf("RX stats = %s, want 1 packet/5 bytes", snapshot)
+	}
 
-	if err := <-errCh; err == nil {
-		t.Fatal("receivePathPackets() final error = nil, want EOF")
+	select {
+	case err := <-errCh:
+		t.Fatalf("receivePathPackets() unexpected error = %v", err)
+	default:
+	}
+}
+
+func TestIsGracefulStreamEnd(t *testing.T) {
+	t.Parallel()
+
+	if !isGracefulStreamEnd(io.EOF) {
+		t.Fatal("isGracefulStreamEnd(io.EOF) = false, want true")
+	}
+	if !isGracefulStreamEnd(&quic.ApplicationError{Remote: true, ErrorCode: 0}) {
+		t.Fatal("isGracefulStreamEnd(application close 0) = false, want true")
+	}
+	if isGracefulStreamEnd(errors.New("boom")) {
+		t.Fatal("isGracefulStreamEnd(generic error) = true, want false")
 	}
 }
 

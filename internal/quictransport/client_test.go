@@ -133,6 +133,59 @@ func TestSendTUNPacketsSkipsFailedPath(t *testing.T) {
 	}
 }
 
+func TestSendTUNPacketsDropsWhenNoActivePath(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	device := &scriptedDevice{
+		reads:  [][]byte{[]byte("packet")},
+		cancel: cancel,
+	}
+	pathSet := newClientPathSet(nil)
+	errCh := make(chan error, 1)
+	var counters stats.Counters
+
+	sendTUNPackets(ctx, device, pathSet, &counters, errCh)
+
+	snapshot := counters.Snapshot()
+	if snapshot.DroppedPackets != 1 {
+		t.Fatalf("drops = %d, want 1", snapshot.DroppedPackets)
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("sendTUNPackets() unexpected error = %v", err)
+	default:
+	}
+}
+
+func TestClientPathSetAddReplacesPath(t *testing.T) {
+	t.Parallel()
+
+	oldStream := &bufferStream{}
+	newStream := &bufferStream{}
+	pathSet := newClientPathSet([]clientPath{{id: 0, stream: oldStream}})
+
+	oldPath, replaced := pathSet.add(clientPath{id: 0, stream: newStream})
+	if !replaced {
+		t.Fatal("add() replaced = false, want true")
+	}
+	if oldPath.stream != oldStream {
+		t.Fatal("add() did not return the replaced path")
+	}
+	if active := pathSet.len(); active != 1 {
+		t.Fatalf("active paths = %d, want 1", active)
+	}
+
+	path, err := pathSet.nextPath()
+	if err != nil {
+		t.Fatalf("nextPath() error = %v", err)
+	}
+	if path.stream != newStream {
+		t.Fatal("nextPath() returned the old stream, want replacement")
+	}
+}
+
 func TestReceivePathPacketsWritesToTUNDevice(t *testing.T) {
 	t.Parallel()
 
@@ -175,6 +228,71 @@ func TestReceivePathPacketsWritesToTUNDevice(t *testing.T) {
 	case err := <-errCh:
 		t.Fatalf("receivePathPackets() unexpected error = %v", err)
 	default:
+	}
+}
+
+func TestReceivePathPacketsRemovesFailedPathWithoutFatalError(t *testing.T) {
+	t.Parallel()
+
+	stream := &readErrorStream{err: errors.New("broken read")}
+	errCh := make(chan error, 1)
+	var counters stats.Counters
+	pathSet := newClientPathSet([]clientPath{{id: 0, stream: stream}})
+
+	receivePathPackets(context.Background(), clientPath{id: 0, stream: stream}, &scriptedDevice{}, &sync.Mutex{}, pathSet, &counters, errCh)
+
+	if active := pathSet.len(); active != 0 {
+		t.Fatalf("active paths = %d, want 0", active)
+	}
+	if !stream.closed {
+		t.Fatal("failed path stream was not closed")
+	}
+	if snapshot := counters.Snapshot(); snapshot.Errors != 1 {
+		t.Fatalf("errors = %d, want 1", snapshot.Errors)
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("receivePathPackets() unexpected fatal error = %v", err)
+	default:
+	}
+}
+
+func TestReconnectBackoffClampsAndResets(t *testing.T) {
+	t.Parallel()
+
+	backoff := newReconnectBackoff(100*time.Millisecond, 250*time.Millisecond)
+	want := []time.Duration{
+		100 * time.Millisecond,
+		200 * time.Millisecond,
+		250 * time.Millisecond,
+		250 * time.Millisecond,
+	}
+	for i, expected := range want {
+		if got := backoff.next(); got != expected {
+			t.Fatalf("next(%d) = %s, want %s", i, got, expected)
+		}
+	}
+
+	backoff.reset()
+	if got := backoff.next(); got != 100*time.Millisecond {
+		t.Fatalf("next() after reset = %s, want 100ms", got)
+	}
+}
+
+func TestNormalizeTUNReconnectIntervals(t *testing.T) {
+	t.Parallel()
+
+	minDelay, maxDelay, err := normalizeTUNReconnectIntervals(0, 0)
+	if err != nil {
+		t.Fatalf("normalizeTUNReconnectIntervals(defaults) error = %v", err)
+	}
+	if minDelay != DefaultTUNReconnectMinInterval || maxDelay != DefaultTUNReconnectMaxInterval {
+		t.Fatalf("defaults = %s/%s, want %s/%s", minDelay, maxDelay, DefaultTUNReconnectMinInterval, DefaultTUNReconnectMaxInterval)
+	}
+
+	if _, _, err := normalizeTUNReconnectIntervals(2*time.Second, time.Second); err == nil {
+		t.Fatal("normalizeTUNReconnectIntervals(min > max) error = nil, want error")
 	}
 }
 
@@ -269,5 +387,27 @@ func (s *failingStream) Close() error {
 }
 
 func (s *failingStream) SetDeadline(time.Time) error {
+	return nil
+}
+
+type readErrorStream struct {
+	err    error
+	closed bool
+}
+
+func (s *readErrorStream) Read([]byte) (int, error) {
+	return 0, s.err
+}
+
+func (s *readErrorStream) Write(packet []byte) (int, error) {
+	return len(packet), nil
+}
+
+func (s *readErrorStream) Close() error {
+	s.closed = true
+	return nil
+}
+
+func (s *readErrorStream) SetDeadline(time.Time) error {
 	return nil
 }

@@ -72,7 +72,11 @@ The client creates path 0 from `server0` and path 1 from `server1` when the
 addresses are provided. Packet sends use round-robin path selection across the
 connected paths.
 
-There is no retransmission, path health scoring, congestion coordination, or
-packet reordering logic in the MVP. Reliability is left to QUIC streams on each
-individual path. TUN mode does remove closed streams from the active path set,
-and a packet write that fails on one path is retried on the next active path.
+TUN mode removes closed or failed streams from the active path set, retries a
+packet write on the next active path, and redials missing configured paths with
+bounded exponential backoff. If all paths are down, outbound TUN packets are
+dropped until at least one path reconnects.
+
+There is no packet retransmission above QUIC, path quality scoring, congestion
+coordination, or packet reordering logic in the MVP. Reliability is left to QUIC
+streams on each individual path.

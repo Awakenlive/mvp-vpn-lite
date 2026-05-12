@@ -16,6 +16,8 @@ GOCACHE=/tmp/mvp-vpn-lite-gocache GOMODCACHE=/tmp/mvp-vpn-lite-gomodcache go tes
 - TUN device name normalization.
 - TUN pump helpers with in-memory device and stream fakes.
 - Client path failover when a TUN write hits a failed QUIC stream.
+- TUN client reconnect backoff, active path replacement, and all-paths-down
+  packet drops.
 - Server TUN session path selection and device forwarding helpers.
 - Packet stats counters and formatting.
 - TLS config loading for server cert/key files and client CA files.
@@ -119,6 +121,6 @@ sudo ./scripts/cleanup-server.sh
 
 - No automated integration test opens a real TUN device, because that requires
   root or `CAP_NET_ADMIN`.
-- No network fault injection or path failure recovery tests yet.
+- No real network fault injection or end-to-end reconnect test yet.
 - No automated full TUN-to-TUN integration test yet.
 - No NAT or packet policy tests yet.

@@ -21,7 +21,14 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-const defaultClientRequestTimeout = 5 * time.Second
+const (
+	defaultClientRequestTimeout = 5 * time.Second
+	defaultClientKeepAlive      = 10 * time.Second
+	defaultClientMaxIdleTimeout = 30 * time.Second
+
+	DefaultTUNReconnectMinInterval = 1 * time.Second
+	DefaultTUNReconnectMaxInterval = 30 * time.Second
+)
 
 // ClientConfig contains the remote addresses and virtual IPs used by the demo
 // client.
@@ -42,12 +49,14 @@ type ClientConfig struct {
 // TUNClientConfig contains the remote addresses and local TUN device used by
 // the packet pump.
 type TUNClientConfig struct {
-	Server0       string
-	Server1       string
-	CAFile        string
-	ServerName    string
-	DeviceName    string
-	StatsInterval time.Duration
+	Server0              string
+	Server1              string
+	CAFile               string
+	ServerName           string
+	DeviceName           string
+	StatsInterval        time.Duration
+	ReconnectMinInterval time.Duration
+	ReconnectMaxInterval time.Duration
 }
 
 // RunClient connects to the configured QUIC paths and sends demo ICMP echo
@@ -141,6 +150,10 @@ func RunTUNClient(ctx context.Context, cfg TUNClientConfig) error {
 	if cfg.Server0 == "" && cfg.Server1 == "" {
 		return errors.New("at least one QUIC server address is required")
 	}
+	reconnectMin, reconnectMax, err := normalizeTUNReconnectIntervals(cfg.ReconnectMinInterval, cfg.ReconnectMaxInterval)
+	if err != nil {
+		return err
+	}
 
 	device, err := tun.Open(cfg.DeviceName)
 	if err != nil {
@@ -154,12 +167,6 @@ func RunTUNClient(ctx context.Context, cfg TUNClientConfig) error {
 		return err
 	}
 
-	paths, err := dialClientPaths(ctx, cfg.Server0, cfg.Server1, tlsConfig)
-	if err != nil {
-		return err
-	}
-	defer closeClientPaths(paths)
-
 	var counters stats.Counters
 	ctx, cancelStats := context.WithCancel(ctx)
 	defer cancelStats()
@@ -168,7 +175,24 @@ func RunTUNClient(ctx context.Context, cfg TUNClientConfig) error {
 		log.Printf("stats final: %s", counters.Snapshot())
 	}()
 
-	return pumpTUN(ctx, device, paths, &counters)
+	pathSpecs := clientPathSpecs(cfg.Server0, cfg.Server1)
+	paths := dialAvailableClientPaths(ctx, pathSpecs, tlsConfig, &counters)
+	if len(paths) == 0 {
+		log.Printf("no initial QUIC TUN paths connected; reconnect loop will keep trying")
+	}
+
+	reconnect := &clientReconnectConfig{
+		pathSpecs: pathSpecs,
+		tlsConfig: tlsConfig,
+		minDelay:  reconnectMin,
+		maxDelay:  reconnectMax,
+	}
+	return pumpTUN(ctx, device, paths, &counters, reconnect)
+}
+
+type clientPathSpec struct {
+	id      int
+	address string
 }
 
 type clientPath struct {
@@ -184,35 +208,76 @@ type clientStream interface {
 	SetDeadline(time.Time) error
 }
 
-func dialClientPaths(ctx context.Context, server0, server1 string, tlsConfig *tls.Config) ([]clientPath, error) {
-	var paths []clientPath
+func clientPathSpecs(server0, server1 string) []clientPathSpec {
+	var specs []clientPathSpec
 	if server0 != "" {
-		paths = append(paths, clientPath{id: 0, address: server0})
+		specs = append(specs, clientPathSpec{id: 0, address: server0})
 	}
 	if server1 != "" {
-		paths = append(paths, clientPath{id: 1, address: server1})
+		specs = append(specs, clientPathSpec{id: 1, address: server1})
 	}
+	return specs
+}
 
-	for i := range paths {
-		conn, err := quic.DialAddr(ctx, paths[i].address, tlsConfig.Clone(), nil)
+func dialClientPaths(ctx context.Context, server0, server1 string, tlsConfig *tls.Config) ([]clientPath, error) {
+	specs := clientPathSpecs(server0, server1)
+	paths := make([]clientPath, 0, len(specs))
+
+	for _, spec := range specs {
+		path, err := dialClientPath(ctx, spec, tlsConfig)
 		if err != nil {
-			closeClientPaths(paths[:i])
-			return nil, fmt.Errorf("path %d dial %s: %w", paths[i].id, paths[i].address, err)
+			closeClientPaths(paths)
+			return nil, err
 		}
-
-		stream, err := conn.OpenStreamSync(ctx)
-		if err != nil {
-			_ = conn.CloseWithError(0, "open stream failed")
-			closeClientPaths(paths[:i])
-			return nil, fmt.Errorf("path %d open stream: %w", paths[i].id, err)
-		}
-
-		paths[i].conn = conn
-		paths[i].stream = stream
-		log.Printf("path %d connected to %s", paths[i].id, paths[i].address)
+		paths = append(paths, path)
 	}
 
 	return paths, nil
+}
+
+func dialAvailableClientPaths(ctx context.Context, specs []clientPathSpec, tlsConfig *tls.Config, counters *stats.Counters) []clientPath {
+	paths := make([]clientPath, 0, len(specs))
+	for _, spec := range specs {
+		path, err := dialClientPath(ctx, spec, tlsConfig)
+		if err != nil {
+			if ctx.Err() != nil {
+				return paths
+			}
+			counters.AddError()
+			log.Printf("path %d initial dial to %s failed: %v", spec.id, spec.address, err)
+			continue
+		}
+		paths = append(paths, path)
+	}
+	return paths
+}
+
+func dialClientPath(ctx context.Context, spec clientPathSpec, tlsConfig *tls.Config) (clientPath, error) {
+	conn, err := quic.DialAddr(ctx, spec.address, tlsConfig.Clone(), clientQUICConfig())
+	if err != nil {
+		return clientPath{}, fmt.Errorf("path %d dial %s: %w", spec.id, spec.address, err)
+	}
+
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		_ = conn.CloseWithError(0, "open stream failed")
+		return clientPath{}, fmt.Errorf("path %d open stream: %w", spec.id, err)
+	}
+
+	log.Printf("path %d connected to %s", spec.id, spec.address)
+	return clientPath{
+		id:      spec.id,
+		address: spec.address,
+		conn:    conn,
+		stream:  stream,
+	}, nil
+}
+
+func clientQUICConfig() *quic.Config {
+	return &quic.Config{
+		KeepAlivePeriod: defaultClientKeepAlive,
+		MaxIdleTimeout:  defaultClientMaxIdleTimeout,
+	}
 }
 
 type packetDevice interface {
@@ -231,6 +296,21 @@ func newClientPathSet(paths []clientPath) *clientPathSet {
 	return &clientPathSet{
 		paths: append([]clientPath(nil), paths...),
 	}
+}
+
+func (s *clientPathSet) add(path clientPath) (clientPath, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, current := range s.paths {
+		if current.id == path.id {
+			s.paths[i] = path
+			return current, true
+		}
+	}
+
+	s.paths = append(s.paths, path)
+	return clientPath{}, false
 }
 
 func (s *clientPathSet) nextPath() (clientPath, error) {
@@ -265,6 +345,18 @@ func (s *clientPathSet) remove(stream clientStream) (clientPath, bool) {
 	return clientPath{}, false
 }
 
+func (s *clientPathSet) hasPathID(pathID int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, path := range s.paths {
+		if path.id == pathID {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *clientPathSet) len() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -272,12 +364,29 @@ func (s *clientPathSet) len() int {
 	return len(s.paths)
 }
 
-func pumpTUN(ctx context.Context, device packetDevice, paths []clientPath, counters *stats.Counters) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+func (s *clientPathSet) snapshot() []clientPath {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	errCh := make(chan error, len(paths)+1)
+	return append([]clientPath(nil), s.paths...)
+}
+
+type clientReconnectConfig struct {
+	pathSpecs []clientPathSpec
+	tlsConfig *tls.Config
+	minDelay  time.Duration
+	maxDelay  time.Duration
+}
+
+func pumpTUN(ctx context.Context, device packetDevice, paths []clientPath, counters *stats.Counters, reconnect *clientReconnectConfig) error {
+	ctx, cancel := context.WithCancel(ctx)
+
+	errCh := make(chan error, maxTUNClientErrors(paths, reconnect)+1)
 	pathSet := newClientPathSet(paths)
+	defer func() {
+		cancel()
+		closeClientPaths(pathSet.snapshot())
+	}()
 
 	go func() {
 		<-ctx.Done()
@@ -288,6 +397,11 @@ func pumpTUN(ctx context.Context, device packetDevice, paths []clientPath, count
 	for _, path := range paths {
 		go receivePathPackets(ctx, path, device, &deviceWriteMu, pathSet, counters, errCh)
 	}
+	if reconnect != nil {
+		for _, spec := range reconnect.pathSpecs {
+			go reconnectClientPath(ctx, spec, reconnect.tlsConfig, reconnect.minDelay, reconnect.maxDelay, device, &deviceWriteMu, pathSet, counters, errCh)
+		}
+	}
 	go sendTUNPackets(ctx, device, pathSet, counters, errCh)
 
 	select {
@@ -297,6 +411,13 @@ func pumpTUN(ctx context.Context, device packetDevice, paths []clientPath, count
 		cancel()
 		return err
 	}
+}
+
+func maxTUNClientErrors(paths []clientPath, reconnect *clientReconnectConfig) int {
+	if reconnect != nil && len(reconnect.pathSpecs) > len(paths) {
+		return len(reconnect.pathSpecs)
+	}
+	return len(paths)
 }
 
 func sendTUNPackets(ctx context.Context, device packetDevice, pathSet *clientPathSet, counters *stats.Counters, errCh chan<- error) {
@@ -320,8 +441,8 @@ func sendTUNPackets(ctx context.Context, device packetDevice, pathSet *clientPat
 			path, err := pathSet.nextPath()
 			if err != nil {
 				counters.AddDrop()
-				errCh <- err
-				return
+				log.Printf("dropped TUN packet length=%d: %v", len(packet), err)
+				break
 			}
 
 			if err := WriteFrame(path.stream, packet); err != nil {
@@ -342,6 +463,7 @@ func sendTUNPackets(ctx context.Context, device packetDevice, pathSet *clientPat
 func receivePathPackets(ctx context.Context, path clientPath, device packetDevice, deviceWriteMu *sync.Mutex, pathSet *clientPathSet, counters *stats.Counters, errCh chan<- error) {
 	defer func() {
 		if removed, ok := pathSet.remove(path.stream); ok {
+			closeClientPath(removed)
 			log.Printf("path %d receive loop stopped; active paths=%d", removed.id, pathSet.len())
 		}
 	}()
@@ -353,7 +475,7 @@ func receivePathPackets(ctx context.Context, path clientPath, device packetDevic
 				return
 			}
 			counters.AddError()
-			errCh <- fmt.Errorf("path %d read packet: %w", path.id, err)
+			log.Printf("path %d read packet: %v", path.id, err)
 			return
 		}
 
@@ -372,6 +494,114 @@ func receivePathPackets(ctx context.Context, path clientPath, device packetDevic
 
 		log.Printf("path %d received TUN packet length=%d", path.id, len(rawPacket))
 	}
+}
+
+func reconnectClientPath(
+	ctx context.Context,
+	spec clientPathSpec,
+	tlsConfig *tls.Config,
+	minDelay time.Duration,
+	maxDelay time.Duration,
+	device packetDevice,
+	deviceWriteMu *sync.Mutex,
+	pathSet *clientPathSet,
+	counters *stats.Counters,
+	errCh chan<- error,
+) {
+	backoff := newReconnectBackoff(minDelay, maxDelay)
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if pathSet.hasPathID(spec.id) {
+			if !sleepContext(ctx, minDelay) {
+				return
+			}
+			continue
+		}
+
+		path, err := dialClientPath(ctx, spec, tlsConfig)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			counters.AddError()
+			delay := backoff.next()
+			log.Printf("path %d reconnect to %s failed: %v; retrying in %s", spec.id, spec.address, err, delay)
+			if !sleepContext(ctx, delay) {
+				return
+			}
+			continue
+		}
+
+		backoff.reset()
+		if old, replaced := pathSet.add(path); replaced {
+			closeClientPath(old)
+		}
+		log.Printf("path %d reconnected to %s; active paths=%d", path.id, path.address, pathSet.len())
+		go receivePathPackets(ctx, path, device, deviceWriteMu, pathSet, counters, errCh)
+	}
+}
+
+type reconnectBackoff struct {
+	min     time.Duration
+	max     time.Duration
+	current time.Duration
+}
+
+func newReconnectBackoff(minDelay, maxDelay time.Duration) *reconnectBackoff {
+	return &reconnectBackoff{
+		min:     minDelay,
+		max:     maxDelay,
+		current: minDelay,
+	}
+}
+
+func (b *reconnectBackoff) next() time.Duration {
+	delay := b.current
+	if b.current < b.max {
+		b.current *= 2
+		if b.current > b.max {
+			b.current = b.max
+		}
+	}
+	return delay
+}
+
+func (b *reconnectBackoff) reset() {
+	b.current = b.min
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func normalizeTUNReconnectIntervals(minDelay, maxDelay time.Duration) (time.Duration, time.Duration, error) {
+	if minDelay == 0 {
+		minDelay = DefaultTUNReconnectMinInterval
+	}
+	if maxDelay == 0 {
+		maxDelay = DefaultTUNReconnectMaxInterval
+	}
+	if minDelay < 0 {
+		return 0, 0, fmt.Errorf("reconnect min interval must not be negative: %s", minDelay)
+	}
+	if maxDelay < 0 {
+		return 0, 0, fmt.Errorf("reconnect max interval must not be negative: %s", maxDelay)
+	}
+	if minDelay > maxDelay {
+		return 0, 0, fmt.Errorf("reconnect min interval %s exceeds max interval %s", minDelay, maxDelay)
+	}
+	return minDelay, maxDelay, nil
 }
 
 func closeClientPaths(paths []clientPath) {

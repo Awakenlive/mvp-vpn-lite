@@ -6,10 +6,10 @@ the client and server side.
 
 ## Current status
 
-Stage 7 is implemented: both client and server have Linux TUN modes, and the
-helper scripts now support dry-run command checks plus optional server-side
-routes. The demo client/server still exist for quick socket-only checks. Packet
-counters and periodic stats logging are wired into demo and TUN paths.
+Stage 8 is implemented: both client and server have Linux TUN modes, and the
+TUN client reconnects failed QUIC paths with bounded backoff. The helper
+scripts support dry-run command checks plus optional server-side routes. The
+demo client/server still exist for quick socket-only checks.
 
 Implemented pieces:
 
@@ -21,6 +21,7 @@ Implemented pieces:
 - Linux TUN client/server modes and idempotent setup/cleanup helper scripts.
 - RX/TX/drop/error counters with `-stats-interval`.
 - Optional server TLS cert/key files and client CA verification.
+- TUN client path removal, packet failover, and reconnect with bounded backoff.
 
 Main limitations:
 
@@ -30,6 +31,8 @@ Main limitations:
 - The default server mode still answers IPv4 ICMP echo packets itself.
 - TUN server mode forwards raw IPv4 packets to the server TUN device, but there
   is no authentication, routing policy, or NAT management yet.
+- There is no packet retransmission, reordering, or path quality scoring beyond
+  active/inactive path tracking.
 
 ## Requirements
 
@@ -168,6 +171,8 @@ Client:
 - `-count`: number of synthetic echo requests in non-TUN mode.
 - `-tun`: enable TUN packet pump mode.
 - `-tun-name`: TUN device name, default `mvpvpn0`.
+- `-reconnect-min`, `-reconnect-max`: bounded backoff range for reconnecting
+  failed TUN paths, defaults `1s` and `30s`.
 - `-stats-interval`: periodic stats interval, default `10s`; use `0` to disable
   periodic logs.
 

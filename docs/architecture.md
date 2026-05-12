@@ -91,7 +91,10 @@ The TUN client starts one goroutine for reading from the TUN device and one
 receiver goroutine per connected path. Writes back to the TUN device are guarded
 by a mutex because multiple path receivers can return packets concurrently.
 Closed or failed client streams are removed from the active path set, and
-outbound packets are retried on the next live path when a write fails.
+outbound packets are retried on the next live path when a write fails. One
+reconnect goroutine per configured path watches the active set and redials
+missing paths with bounded backoff. The client enables QUIC keepalive packets so
+idle broken paths can be noticed by the connection idle timeout.
 
 The TUN server mirrors that shape: one goroutine reads from the server TUN
 device, and one receiver goroutine per accepted QUIC stream writes packets into

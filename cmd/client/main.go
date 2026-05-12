@@ -28,6 +28,8 @@ func main() {
 	statsInterval := flag.Duration("stats-interval", 10*time.Second, "stats log interval; 0 disables periodic stats")
 	tunMode := flag.Bool("tun", false, "connect a local TUN device to the QUIC paths")
 	tunName := flag.String("tun-name", tun.DefaultDeviceName, "TUN device name for -tun mode")
+	reconnectMin := flag.Duration("reconnect-min", quictransport.DefaultTUNReconnectMinInterval, "minimum retry delay for reconnecting failed TUN paths")
+	reconnectMax := flag.Duration("reconnect-max", quictransport.DefaultTUNReconnectMaxInterval, "maximum retry delay for reconnecting failed TUN paths")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -35,12 +37,14 @@ func main() {
 
 	if *tunMode {
 		cfg := quictransport.TUNClientConfig{
-			Server0:       *server0,
-			Server1:       *server1,
-			CAFile:        *caCert,
-			ServerName:    *serverName,
-			DeviceName:    *tunName,
-			StatsInterval: *statsInterval,
+			Server0:              *server0,
+			Server1:              *server1,
+			CAFile:               *caCert,
+			ServerName:           *serverName,
+			DeviceName:           *tunName,
+			StatsInterval:        *statsInterval,
+			ReconnectMinInterval: *reconnectMin,
+			ReconnectMaxInterval: *reconnectMax,
 		}
 
 		log.Printf("starting QUIC TUN client: server0=%s server1=%s tun-name=%s", cfg.Server0, cfg.Server1, cfg.DeviceName)

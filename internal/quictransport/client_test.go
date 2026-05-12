@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"mvp-vpn-lite/internal/multipath"
 	"mvp-vpn-lite/internal/packet"
 	"mvp-vpn-lite/internal/stats"
 
@@ -70,16 +69,13 @@ func TestSendTUNPacketsUsesRoundRobinPaths(t *testing.T) {
 	}
 	stream0 := &bufferStream{}
 	stream1 := &bufferStream{}
-	scheduler, err := multipath.NewRoundRobin(2)
-	if err != nil {
-		t.Fatalf("NewRoundRobin() error = %v", err)
-	}
-	var counters stats.Counters
-
-	sendTUNPackets(ctx, device, []clientPath{
+	pathSet := newClientPathSet([]clientPath{
 		{id: 0, stream: stream0},
 		{id: 1, stream: stream1},
-	}, scheduler, &counters, make(chan error, 1))
+	})
+	var counters stats.Counters
+
+	sendTUNPackets(ctx, device, pathSet, &counters, make(chan error, 1))
 
 	got0, err := ReadFrame(stream0)
 	if err != nil {
@@ -100,6 +96,43 @@ func TestSendTUNPacketsUsesRoundRobinPaths(t *testing.T) {
 	}
 }
 
+func TestSendTUNPacketsSkipsFailedPath(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	device := &scriptedDevice{
+		reads:  [][]byte{[]byte("packet")},
+		cancel: cancel,
+	}
+	failed := &failingStream{err: errors.New("broken stream")}
+	fallback := &bufferStream{}
+	pathSet := newClientPathSet([]clientPath{
+		{id: 0, stream: failed},
+		{id: 1, stream: fallback},
+	})
+	var counters stats.Counters
+
+	sendTUNPackets(ctx, device, pathSet, &counters, make(chan error, 1))
+
+	got, err := ReadFrame(fallback)
+	if err != nil {
+		t.Fatalf("ReadFrame(fallback) error = %v", err)
+	}
+	if string(got) != "packet" {
+		t.Fatalf("fallback packet = %q, want packet", got)
+	}
+	if !failed.closed {
+		t.Fatal("failed path stream was not closed")
+	}
+	if active := pathSet.len(); active != 1 {
+		t.Fatalf("active paths = %d, want 1", active)
+	}
+	snapshot := counters.Snapshot()
+	if snapshot.TXPackets != 1 || snapshot.TXBytes != 6 || snapshot.Errors != 1 {
+		t.Fatalf("stats = %s, want 1 tx packet/6 bytes and 1 error", snapshot)
+	}
+}
+
 func TestReceivePathPacketsWritesToTUNDevice(t *testing.T) {
 	t.Parallel()
 
@@ -110,10 +143,11 @@ func TestReceivePathPacketsWritesToTUNDevice(t *testing.T) {
 	device := &scriptedDevice{}
 	errCh := make(chan error, 1)
 	var counters stats.Counters
+	pathSet := newClientPathSet([]clientPath{{id: 0, stream: stream}})
 
 	done := make(chan struct{})
 	go func() {
-		receivePathPackets(context.Background(), clientPath{id: 0, stream: stream}, device, &sync.Mutex{}, &counters, errCh)
+		receivePathPackets(context.Background(), clientPath{id: 0, stream: stream}, device, &sync.Mutex{}, pathSet, &counters, errCh)
 		close(done)
 	}()
 
@@ -132,6 +166,9 @@ func TestReceivePathPacketsWritesToTUNDevice(t *testing.T) {
 	}
 	if snapshot := counters.Snapshot(); snapshot.RXPackets != 1 || snapshot.RXBytes != 5 {
 		t.Fatalf("RX stats = %s, want 1 packet/5 bytes", snapshot)
+	}
+	if active := pathSet.len(); active != 0 {
+		t.Fatalf("active paths = %d, want 0", active)
 	}
 
 	select {
@@ -210,5 +247,27 @@ func (s *bufferStream) Close() error {
 }
 
 func (s *bufferStream) SetDeadline(time.Time) error {
+	return nil
+}
+
+type failingStream struct {
+	err    error
+	closed bool
+}
+
+func (s *failingStream) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (s *failingStream) Write([]byte) (int, error) {
+	return 0, s.err
+}
+
+func (s *failingStream) Close() error {
+	s.closed = true
+	return nil
+}
+
+func (s *failingStream) SetDeadline(time.Time) error {
 	return nil
 }

@@ -14,6 +14,7 @@ GOCACHE=/tmp/mvp-vpn-lite-gocache GOMODCACHE=/tmp/mvp-vpn-lite-gomodcache go tes
 - Round-robin path scheduling.
 - TUN device name normalization.
 - TUN pump helpers with in-memory device and stream fakes.
+- Client path failover when a TUN write hits a failed QUIC stream.
 - Server TUN session path selection and device forwarding helpers.
 - Packet stats counters and formatting.
 

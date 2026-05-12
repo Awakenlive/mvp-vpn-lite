@@ -146,11 +146,6 @@ func RunTUNClient(ctx context.Context, cfg TUNClientConfig) error {
 	}
 	defer closeClientPaths(paths)
 
-	scheduler, err := multipath.NewRoundRobin(len(paths))
-	if err != nil {
-		return err
-	}
-
 	var counters stats.Counters
 	ctx, cancelStats := context.WithCancel(ctx)
 	defer cancelStats()
@@ -159,7 +154,7 @@ func RunTUNClient(ctx context.Context, cfg TUNClientConfig) error {
 		log.Printf("stats final: %s", counters.Snapshot())
 	}()
 
-	return pumpTUN(ctx, device, paths, scheduler, &counters)
+	return pumpTUN(ctx, device, paths, &counters)
 }
 
 type clientPath struct {
@@ -218,15 +213,63 @@ type packetDevice interface {
 	Close() error
 }
 
-type pathScheduler interface {
-	Next() int
+type clientPathSet struct {
+	mu    sync.Mutex
+	paths []clientPath
+	next  int
 }
 
-func pumpTUN(ctx context.Context, device packetDevice, paths []clientPath, scheduler pathScheduler, counters *stats.Counters) error {
+func newClientPathSet(paths []clientPath) *clientPathSet {
+	return &clientPathSet{
+		paths: append([]clientPath(nil), paths...),
+	}
+}
+
+func (s *clientPathSet) nextPath() (clientPath, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.paths) == 0 {
+		return clientPath{}, errors.New("no active QUIC paths")
+	}
+
+	path := s.paths[s.next%len(s.paths)]
+	s.next = (s.next + 1) % len(s.paths)
+	return path, nil
+}
+
+func (s *clientPathSet) remove(stream clientStream) (clientPath, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, path := range s.paths {
+		if path.stream == stream {
+			s.paths = append(s.paths[:i], s.paths[i+1:]...)
+			if len(s.paths) == 0 {
+				s.next = 0
+			} else if s.next >= len(s.paths) {
+				s.next %= len(s.paths)
+			}
+			return path, true
+		}
+	}
+
+	return clientPath{}, false
+}
+
+func (s *clientPathSet) len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return len(s.paths)
+}
+
+func pumpTUN(ctx context.Context, device packetDevice, paths []clientPath, counters *stats.Counters) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	errCh := make(chan error, len(paths)+1)
+	pathSet := newClientPathSet(paths)
 
 	go func() {
 		<-ctx.Done()
@@ -235,9 +278,9 @@ func pumpTUN(ctx context.Context, device packetDevice, paths []clientPath, sched
 
 	var deviceWriteMu sync.Mutex
 	for _, path := range paths {
-		go receivePathPackets(ctx, path, device, &deviceWriteMu, counters, errCh)
+		go receivePathPackets(ctx, path, device, &deviceWriteMu, pathSet, counters, errCh)
 	}
-	go sendTUNPackets(ctx, device, paths, scheduler, counters, errCh)
+	go sendTUNPackets(ctx, device, pathSet, counters, errCh)
 
 	select {
 	case <-ctx.Done():
@@ -248,7 +291,7 @@ func pumpTUN(ctx context.Context, device packetDevice, paths []clientPath, sched
 	}
 }
 
-func sendTUNPackets(ctx context.Context, device packetDevice, paths []clientPath, scheduler pathScheduler, counters *stats.Counters, errCh chan<- error) {
+func sendTUNPackets(ctx context.Context, device packetDevice, pathSet *clientPathSet, counters *stats.Counters, errCh chan<- error) {
 	buffer := make([]byte, MaxFrameSize)
 	for {
 		n, err := device.Read(buffer)
@@ -264,20 +307,37 @@ func sendTUNPackets(ctx context.Context, device packetDevice, paths []clientPath
 			continue
 		}
 
-		path := paths[scheduler.Next()]
 		packet := append([]byte(nil), buffer[:n]...)
-		if err := WriteFrame(path.stream, packet); err != nil {
-			counters.AddError()
-			errCh <- fmt.Errorf("path %d write TUN packet: %w", path.id, err)
-			return
-		}
-		counters.AddTX(len(packet))
+		for {
+			path, err := pathSet.nextPath()
+			if err != nil {
+				counters.AddDrop()
+				errCh <- err
+				return
+			}
 
-		log.Printf("path %d sent TUN packet length=%d", path.id, len(packet))
+			if err := WriteFrame(path.stream, packet); err != nil {
+				counters.AddError()
+				if removed, ok := pathSet.remove(path.stream); ok {
+					closeClientPath(removed)
+					log.Printf("path %d removed after write error: %v; active paths=%d", removed.id, err, pathSet.len())
+				}
+				continue
+			}
+			counters.AddTX(len(packet))
+			log.Printf("path %d sent TUN packet length=%d", path.id, len(packet))
+			break
+		}
 	}
 }
 
-func receivePathPackets(ctx context.Context, path clientPath, device packetDevice, deviceWriteMu *sync.Mutex, counters *stats.Counters, errCh chan<- error) {
+func receivePathPackets(ctx context.Context, path clientPath, device packetDevice, deviceWriteMu *sync.Mutex, pathSet *clientPathSet, counters *stats.Counters, errCh chan<- error) {
+	defer func() {
+		if removed, ok := pathSet.remove(path.stream); ok {
+			log.Printf("path %d receive loop stopped; active paths=%d", removed.id, pathSet.len())
+		}
+	}()
+
 	for {
 		rawPacket, err := ReadFrame(path.stream)
 		if err != nil {
@@ -308,12 +368,16 @@ func receivePathPackets(ctx context.Context, path clientPath, device packetDevic
 
 func closeClientPaths(paths []clientPath) {
 	for _, path := range paths {
-		if path.stream != nil {
-			_ = path.stream.Close()
-		}
-		if path.conn != nil {
-			_ = path.conn.CloseWithError(0, "client stopped")
-		}
+		closeClientPath(path)
+	}
+}
+
+func closeClientPath(path clientPath) {
+	if path.stream != nil {
+		_ = path.stream.Close()
+	}
+	if path.conn != nil {
+		_ = path.conn.CloseWithError(0, "client stopped")
 	}
 }
 

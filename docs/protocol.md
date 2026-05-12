@@ -70,4 +70,5 @@ connected paths.
 
 There is no retransmission, path health scoring, congestion coordination, or
 packet reordering logic in the MVP. Reliability is left to QUIC streams on each
-individual path.
+individual path. TUN mode does remove closed streams from the active path set,
+and a packet write that fails on one path is retried on the next active path.

@@ -5,6 +5,7 @@ Use a writable Go cache when running in restricted environments:
 ```sh
 GOCACHE=/tmp/mvp-vpn-lite-gocache GOMODCACHE=/tmp/mvp-vpn-lite-gomodcache go test ./...
 ./scripts/check-tun-scripts.sh
+./scripts/check-operational-examples.sh
 ```
 
 ## What the tests and checks cover
@@ -22,6 +23,8 @@ GOCACHE=/tmp/mvp-vpn-lite-gocache GOMODCACHE=/tmp/mvp-vpn-lite-gomodcache go tes
 - Packet stats counters and formatting.
 - TLS config loading for server cert/key files and client CA files.
 - TUN helper command rendering through `DRY_RUN=1`.
+- Environment-variable parsing for command defaults.
+- Operational example shape for env files and systemd units.
 
 ## Smoke test without TUN
 

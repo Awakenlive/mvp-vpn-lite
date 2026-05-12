@@ -31,11 +31,22 @@ connected QUIC paths.
 Wraps Linux TUN creation/opening. The device uses `IFF_TUN | IFF_NO_PI`, so the
 packet stream contains raw IP packets without a packet-info prefix.
 
+`internal/envconfig`
+
+Reads typed environment defaults for command-line flags. The commands still use
+Go's standard `flag` package, so explicit flags override environment-provided
+defaults.
+
 `scripts`
 
 Provides idempotent Linux TUN setup/cleanup helpers for client and server
 hosts. The helpers can print their `iproute2` commands with `DRY_RUN=1`, and the
 server helper can install an optional route through the server TUN device.
+
+`examples`
+
+Contains environment files and systemd units for running the client and server
+as long-lived Linux services.
 
 `internal/stats`
 
@@ -47,12 +58,14 @@ final snapshot on shutdown.
 
 Parses flags, creates a `quictransport.ServerConfig`, and starts one or two QUIC
 listeners. With `-tun`, it starts the server-side TUN packet pump instead of the
-synthetic ICMP responder.
+synthetic ICMP responder. Server flags can be defaulted with `MVPVPN_SERVER_*`
+environment variables.
 
 `cmd/client`
 
 Parses flags, starts synthetic mode by default, or starts the TUN packet pump
-when `-tun` is set.
+when `-tun` is set. Client flags can be defaulted with `MVPVPN_CLIENT_*`
+environment variables.
 
 ## Packet flow
 

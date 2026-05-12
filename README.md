@@ -6,9 +6,9 @@ the client and server side.
 
 ## Current status
 
-Stage 8 is implemented: both client and server have Linux TUN modes, and the
-TUN client reconnects failed QUIC paths with bounded backoff. The helper
-scripts support dry-run command checks plus optional server-side routes. The
+Stage 9 is implemented: both client and server have Linux TUN modes, the TUN
+client reconnects failed QUIC paths with bounded backoff, and the command-line
+tools can be configured from environment files for systemd-style operation. The
 demo client/server still exist for quick socket-only checks.
 
 Implemented pieces:
@@ -22,6 +22,8 @@ Implemented pieces:
 - RX/TX/drop/error counters with `-stats-interval`.
 - Optional server TLS cert/key files and client CA verification.
 - TUN client path removal, packet failover, and reconnect with bounded backoff.
+- Environment-variable defaults for every command-line flag.
+- Example environment files and systemd units for client/server services.
 
 Main limitations:
 
@@ -39,6 +41,7 @@ Main limitations:
 - Go 1.25 or newer.
 - Linux with `/dev/net/tun` for `-tun` mode.
 - `iproute2` for the helper scripts.
+- Optional: systemd for the example service units.
 
 ## Quick demo without TUN
 
@@ -148,6 +151,10 @@ DRY_RUN=1 ./scripts/cleanup-server.sh
 
 ## Useful flags
 
+Every flag can also be set through an environment variable. Explicit flags
+override environment defaults. See `docs/operations.md` for the full mapping and
+systemd examples.
+
 Server:
 
 - `-listen0`, `-listen1`: QUIC listen addresses. Leave either empty to use one
@@ -181,6 +188,8 @@ Client:
 ```sh
 GOCACHE=/tmp/mvp-vpn-lite-gocache GOMODCACHE=/tmp/mvp-vpn-lite-gomodcache go test ./...
 ./scripts/check-tun-scripts.sh
+./scripts/check-operational-examples.sh
 ```
 
-More details are in `docs/testing.md`.
+More details are in `docs/testing.md`. Operational install notes are in
+`docs/operations.md`.

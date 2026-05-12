@@ -1,0 +1,19 @@
+[Unit]
+Description=mvp-vpn-lite QUIC TUN server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/mvp-vpn-lite/server.env
+ExecStartPre=/usr/local/share/mvp-vpn-lite/scripts/setup-server.sh
+ExecStart=/usr/local/bin/mvp-vpn-lite-server
+ExecStopPost=/usr/local/share/mvp-vpn-lite/scripts/cleanup-server.sh
+Restart=on-failure
+RestartSec=2s
+KillSignal=SIGINT
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target

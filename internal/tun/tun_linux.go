@@ -20,11 +20,17 @@ func Open(name string) (*Device, error) {
 	}
 	ifreq.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI)
 
-	file, err := os.OpenFile(devicePath, os.O_RDWR, 0)
+	fd, err := unix.Open(devicePath, unix.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", devicePath, err)
 	}
-	if err := unix.IoctlIfreq(int(file.Fd()), unix.TUNSETIFF, ifreq); err != nil {
+
+	file := os.NewFile(uintptr(fd), devicePath)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("wrap %s file descriptor: nil file", devicePath)
+	}
+	if err := unix.IoctlIfreq(fd, unix.TUNSETIFF, ifreq); err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("configure TUN %s: %w", deviceName, err)
 	}

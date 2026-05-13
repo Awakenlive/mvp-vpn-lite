@@ -2,6 +2,8 @@ package quictransport
 
 import (
 	"context"
+	"errors"
+	"os"
 	"testing"
 
 	"mvp-vpn-lite/internal/stats"
@@ -64,5 +66,41 @@ func TestServerTUNSessionForwardDevicePackets(t *testing.T) {
 	}
 	if snapshot := counters.Snapshot(); snapshot.TXPackets != 1 || snapshot.TXBytes != 5 {
 		t.Fatalf("TX stats = %s, want 1 packet/5 bytes", snapshot)
+	}
+}
+
+func TestServerTUNSessionForwardDevicePacketsRetriesNotPollableRead(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	device := &scriptedDevice{
+		readErrors: []error{&os.PathError{Op: "read", Path: "/dev/net/tun", Err: errors.New("not pollable")}},
+		reads:      [][]byte{[]byte("reply")},
+		cancel:     cancel,
+	}
+	var counters stats.Counters
+	session := newServerTUNSession(device, &counters)
+	stream := &bufferStream{}
+	session.addPath(0, stream)
+	errCh := make(chan error, 1)
+
+	session.forwardDevicePackets(ctx, errCh)
+
+	got, err := ReadFrame(stream)
+	if err != nil {
+		t.Fatalf("ReadFrame(stream) error = %v", err)
+	}
+	if string(got) != "reply" {
+		t.Fatalf("stream packet = %q, want reply", got)
+	}
+	snapshot := counters.Snapshot()
+	if snapshot.Errors != 1 || snapshot.TXPackets != 1 || snapshot.TXBytes != 5 {
+		t.Fatalf("stats = %s, want 1 transient error and 1 tx packet/5 bytes", snapshot)
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("forwardDevicePackets() unexpected fatal error = %v", err)
+	default:
 	}
 }

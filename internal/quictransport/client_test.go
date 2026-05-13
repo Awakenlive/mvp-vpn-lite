@@ -159,6 +159,41 @@ func TestSendTUNPacketsDropsWhenNoActivePath(t *testing.T) {
 	}
 }
 
+func TestSendTUNPacketsRetriesNotPollableRead(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	device := &scriptedDevice{
+		readErrors: []error{&os.PathError{Op: "read", Path: "/dev/net/tun", Err: errors.New("not pollable")}},
+		reads:      [][]byte{[]byte("packet")},
+		cancel:     cancel,
+	}
+	stream := &bufferStream{}
+	pathSet := newClientPathSet([]clientPath{{id: 0, stream: stream}})
+	errCh := make(chan error, 1)
+	var counters stats.Counters
+
+	sendTUNPackets(ctx, device, pathSet, &counters, errCh)
+
+	got, err := ReadFrame(stream)
+	if err != nil {
+		t.Fatalf("ReadFrame(stream) error = %v", err)
+	}
+	if string(got) != "packet" {
+		t.Fatalf("stream packet = %q, want packet", got)
+	}
+	snapshot := counters.Snapshot()
+	if snapshot.Errors != 1 || snapshot.TXPackets != 1 || snapshot.TXBytes != 6 {
+		t.Fatalf("stats = %s, want 1 transient error and 1 tx packet/6 bytes", snapshot)
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("sendTUNPackets() unexpected fatal error = %v", err)
+	default:
+	}
+}
+
 func TestClientPathSetAddReplacesPath(t *testing.T) {
 	t.Parallel()
 
@@ -311,15 +346,22 @@ func TestIsGracefulStreamEnd(t *testing.T) {
 }
 
 type scriptedDevice struct {
-	mu     sync.Mutex
-	reads  [][]byte
-	writes [][]byte
-	cancel context.CancelFunc
+	mu         sync.Mutex
+	reads      [][]byte
+	readErrors []error
+	writes     [][]byte
+	cancel     context.CancelFunc
 }
 
 func (d *scriptedDevice) Read(packet []byte) (int, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
+	if len(d.readErrors) > 0 {
+		err := d.readErrors[0]
+		d.readErrors = d.readErrors[1:]
+		return 0, err
+	}
 
 	if len(d.reads) == 0 {
 		if d.cancel != nil {

@@ -351,16 +351,29 @@ func (s *serverTUNSession) writeDevice(packet []byte) error {
 
 func (s *serverTUNSession) forwardDevicePackets(ctx context.Context, errCh chan<- error) {
 	buffer := make([]byte, MaxFrameSize)
+	retryableReadErrors := 0
 	for {
 		n, err := s.device.Read(buffer)
 		if err != nil {
-			if ctx.Err() != nil || errors.Is(err, os.ErrClosed) {
+			if isClosedPacketDeviceError(ctx, err) {
 				return
+			}
+			if isRetryablePacketDeviceReadError(err) && retryableReadErrors < maxRetryablePacketDeviceReads {
+				retryableReadErrors++
+				s.counters.AddError()
+				if shouldLogRetryablePacketDeviceRead(retryableReadErrors) {
+					log.Printf("retrying TUN read after transient error: %v", err)
+				}
+				if !sleepContext(ctx, retryablePacketDeviceReadDelay) {
+					return
+				}
+				continue
 			}
 			s.counters.AddError()
 			errCh <- fmt.Errorf("read TUN packet: %w", err)
 			return
 		}
+		retryableReadErrors = 0
 		if n == 0 {
 			continue
 		}

@@ -25,6 +25,9 @@ GOCACHE=/tmp/mvp-vpn-lite-gocache GOMODCACHE=/tmp/mvp-vpn-lite-gomodcache go tes
 - TUN helper command rendering through `DRY_RUN=1`.
 - Environment-variable parsing for command defaults.
 - Operational example shape for env files and systemd units.
+- Root integration coverage with real Linux TUN devices, network fault
+  injection, end-to-end reconnect, and full TUN-to-TUN traffic inside network
+  namespaces.
 
 ## Smoke test without TUN
 
@@ -120,10 +123,39 @@ sudo ./scripts/cleanup-client.sh
 sudo ./scripts/cleanup-server.sh
 ```
 
-## Known test gaps
+## Automated root integration check
 
-- No automated integration test opens a real TUN device, because that requires
-  root or `CAP_NET_ADMIN`.
-- No real network fault injection or end-to-end reconnect test yet.
-- No automated full TUN-to-TUN integration test yet.
-- No NAT or packet policy tests yet.
+The root integration script exercises the cases that cannot run in ordinary
+unit tests because they need real TUN devices, route changes, iptables, and
+network namespaces:
+
+```sh
+sudo ./scripts/integration-root.sh
+```
+
+It builds temporary client/server binaries under `/tmp`, writes logs to
+`/tmp/mvp-vpn-lite-integration`, and fails fast if an expected packet-flow or
+reconnect assertion is missing.
+
+Covered scenarios:
+
+- Real client TUN device plus the synthetic ICMP server.
+- End-to-end network fault injection by blocking one QUIC UDP path with
+  `iptables`.
+- Client path removal, traffic continuing on the surviving path, and reconnect
+  after the injected fault is removed.
+- Full TUN-to-TUN traffic between isolated client/server Linux network
+  namespaces.
+- Cleanup assertions for temporary processes, TUN links, namespaces, and the
+  iptables fault-injection rule.
+
+Expected result:
+
+```text
+[integration-root] PASS
+```
+
+NAT and packet-policy behavior remain outside the current MVP feature set, so
+there is no product behavior to validate there yet. The integration script does
+verify that the temporary fault-injection rule is removed and that the helper
+scripts do not leave test TUN devices or namespaces behind.

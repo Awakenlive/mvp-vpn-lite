@@ -8,7 +8,8 @@ bash -n \
   "$SCRIPT_DIR/setup-client.sh" \
   "$SCRIPT_DIR/setup-server.sh" \
   "$SCRIPT_DIR/cleanup-client.sh" \
-  "$SCRIPT_DIR/cleanup-server.sh"
+  "$SCRIPT_DIR/cleanup-server.sh" \
+  "$SCRIPT_DIR/integration-root.sh"
 
 DRY_RUN=1 "$SCRIPT_DIR/setup-server.sh" >/dev/null
 DRY_RUN=1 "$SCRIPT_DIR/setup-client.sh" >/dev/null

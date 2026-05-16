@@ -2,6 +2,7 @@ package stats
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -19,13 +20,16 @@ type Counters struct {
 
 // Snapshot is a stable point-in-time copy of Counters.
 type Snapshot struct {
-	RXPackets      uint64
-	RXBytes        uint64
-	TXPackets      uint64
-	TXBytes        uint64
-	DroppedPackets uint64
-	Errors         uint64
+	RXPackets      uint64 `json:"rx_packets"`
+	RXBytes        uint64 `json:"rx_bytes"`
+	TXPackets      uint64 `json:"tx_packets"`
+	TXBytes        uint64 `json:"tx_bytes"`
+	DroppedPackets uint64 `json:"dropped_packets"`
+	Errors         uint64 `json:"errors"`
 }
+
+// SnapshotFormatter renders a snapshot for logs.
+type SnapshotFormatter func(Snapshot) string
 
 // AddRX records one received packet.
 func (c *Counters) AddRX(packetBytes int) {
@@ -71,10 +75,28 @@ func (s Snapshot) String() string {
 	return fmt.Sprintf("rx=%d packets/%d bytes tx=%d packets/%d bytes dropped=%d errors=%d", s.RXPackets, s.RXBytes, s.TXPackets, s.TXBytes, s.DroppedPackets, s.Errors)
 }
 
+// TextSnapshot returns the default human-readable stats rendering.
+func TextSnapshot(snapshot Snapshot) string {
+	return snapshot.String()
+}
+
+// JSONSnapshot returns a stable machine-readable stats rendering.
+func JSONSnapshot(snapshot Snapshot) string {
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
+}
+
 // LogEvery writes periodic snapshots until ctx is canceled.
-func LogEvery(ctx context.Context, interval time.Duration, counters *Counters, logf func(string, ...any)) {
+func LogEvery(ctx context.Context, interval time.Duration, counters *Counters, logf func(string, ...any), formatters ...SnapshotFormatter) {
 	if interval <= 0 || counters == nil || logf == nil {
 		return
+	}
+	formatter := TextSnapshot
+	if len(formatters) > 0 && formatters[0] != nil {
+		formatter = formatters[0]
 	}
 
 	ticker := time.NewTicker(interval)
@@ -85,7 +107,7 @@ func LogEvery(ctx context.Context, interval time.Duration, counters *Counters, l
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			logf("stats: %s", counters.Snapshot())
+			logf("stats: %s", formatter(counters.Snapshot()))
 		}
 	}
 }

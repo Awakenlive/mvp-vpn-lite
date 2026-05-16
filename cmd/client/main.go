@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"mvp-vpn-lite/internal/buildinfo"
 	"mvp-vpn-lite/internal/envconfig"
 	"mvp-vpn-lite/internal/quictransport"
 	"mvp-vpn-lite/internal/tun"
@@ -20,6 +22,8 @@ func main() {
 	server1 := flag.String("server1", envconfig.String("MVPVPN_CLIENT_SERVER1", "localhost:4434"), "QUIC server address for path 1 (env MVPVPN_CLIENT_SERVER1)")
 	caCert := flag.String("ca-cert", envconfig.String("MVPVPN_CLIENT_CA_CERT", ""), "PEM CA/server certificate used to verify the QUIC server; empty uses demo insecure TLS (env MVPVPN_CLIENT_CA_CERT)")
 	serverName := flag.String("server-name", envconfig.String("MVPVPN_CLIENT_SERVER_NAME", ""), "TLS server name override for certificate verification (env MVPVPN_CLIENT_SERVER_NAME)")
+	clientCert := flag.String("client-cert", envconfig.String("MVPVPN_CLIENT_TLS_CERT", ""), "PEM client certificate file for mTLS; requires -client-key (env MVPVPN_CLIENT_TLS_CERT)")
+	clientKey := flag.String("client-key", envconfig.String("MVPVPN_CLIENT_TLS_KEY", ""), "PEM client private key file for mTLS; requires -client-cert (env MVPVPN_CLIENT_TLS_KEY)")
 	virtualIP := flag.String("virtual-ip", envconfig.String("MVPVPN_CLIENT_VIRTUAL_IP", "10.8.0.1"), "virtual server IPv4 address (env MVPVPN_CLIENT_VIRTUAL_IP)")
 	clientIP := flag.String("client-ip", envconfig.String("MVPVPN_CLIENT_CLIENT_IP", "10.8.0.2"), "client tunnel IPv4 address (env MVPVPN_CLIENT_CLIENT_IP)")
 	count := flag.Int("count", mustIntEnv("MVPVPN_CLIENT_COUNT", 4), "number of demo ICMP echo requests to send (env MVPVPN_CLIENT_COUNT)")
@@ -27,11 +31,19 @@ func main() {
 	payload := flag.String("payload", envconfig.String("MVPVPN_CLIENT_PAYLOAD", "mvp-vpn-lite"), "ICMP echo payload (env MVPVPN_CLIENT_PAYLOAD)")
 	timeout := flag.Duration("timeout", mustDurationEnv("MVPVPN_CLIENT_TIMEOUT", 5*time.Second), "per-request timeout (env MVPVPN_CLIENT_TIMEOUT)")
 	statsInterval := flag.Duration("stats-interval", mustDurationEnv("MVPVPN_CLIENT_STATS_INTERVAL", 10*time.Second), "stats log interval; 0 disables periodic stats (env MVPVPN_CLIENT_STATS_INTERVAL)")
+	statsJSON := flag.Bool("stats-json", mustBoolEnv("MVPVPN_CLIENT_STATS_JSON", false), "write periodic and final stats as JSON (env MVPVPN_CLIENT_STATS_JSON)")
 	tunMode := flag.Bool("tun", mustBoolEnv("MVPVPN_CLIENT_TUN", false), "connect a local TUN device to the QUIC paths (env MVPVPN_CLIENT_TUN)")
 	tunName := flag.String("tun-name", envconfig.String("MVPVPN_CLIENT_TUN_NAME", tun.DefaultDeviceName), "TUN device name for -tun mode (env MVPVPN_CLIENT_TUN_NAME)")
+	tunAllowedCIDR := flag.String("tun-allow-cidr", envconfig.String("MVPVPN_CLIENT_TUN_ALLOW_CIDR", ""), "optional IPv4 CIDR packet policy for TUN mode; empty allows all packets (env MVPVPN_CLIENT_TUN_ALLOW_CIDR)")
 	reconnectMin := flag.Duration("reconnect-min", mustDurationEnv("MVPVPN_CLIENT_RECONNECT_MIN", quictransport.DefaultTUNReconnectMinInterval), "minimum retry delay for reconnecting failed TUN paths (env MVPVPN_CLIENT_RECONNECT_MIN)")
 	reconnectMax := flag.Duration("reconnect-max", mustDurationEnv("MVPVPN_CLIENT_RECONNECT_MAX", quictransport.DefaultTUNReconnectMaxInterval), "maximum retry delay for reconnecting failed TUN paths (env MVPVPN_CLIENT_RECONNECT_MAX)")
+	version := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *version {
+		fmt.Println(buildinfo.VersionString("mvp-vpn-lite-client"))
+		return
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -42,8 +54,12 @@ func main() {
 			Server1:              *server1,
 			CAFile:               *caCert,
 			ServerName:           *serverName,
+			ClientCertFile:       *clientCert,
+			ClientKeyFile:        *clientKey,
+			TUNAllowedCIDR:       *tunAllowedCIDR,
 			DeviceName:           *tunName,
 			StatsInterval:        *statsInterval,
+			StatsJSON:            *statsJSON,
 			ReconnectMinInterval: *reconnectMin,
 			ReconnectMaxInterval: *reconnectMax,
 		}
@@ -65,6 +81,8 @@ func main() {
 		Server1:        *server1,
 		CAFile:         *caCert,
 		ServerName:     *serverName,
+		ClientCertFile: *clientCert,
+		ClientKeyFile:  *clientKey,
 		VirtualIP:      net.ParseIP(*virtualIP),
 		ClientIP:       net.ParseIP(*clientIP),
 		Identifier:     uint16(*identifier),
@@ -72,6 +90,7 @@ func main() {
 		Payload:        []byte(*payload),
 		RequestTimeout: *timeout,
 		StatsInterval:  *statsInterval,
+		StatsJSON:      *statsJSON,
 	}
 
 	log.Printf("starting QUIC demo client: server0=%s server1=%s virtual-ip=%s client-ip=%s count=%d", cfg.Server0, cfg.Server1, cfg.VirtualIP, cfg.ClientIP, cfg.Count)

@@ -29,15 +29,18 @@ const mvpQUICALPN = "mvp-vpn-lite"
 
 // ServerConfig contains the addresses and virtual IPs used by the demo server.
 type ServerConfig struct {
-	Listen0       string
-	Listen1       string
-	TLSCertFile   string
-	TLSKeyFile    string
-	VirtualIP     net.IP
-	ClientIP      net.IP
-	StatsInterval time.Duration
-	UseTUN        bool
-	DeviceName    string
+	Listen0        string
+	Listen1        string
+	TLSCertFile    string
+	TLSKeyFile     string
+	ClientCAFile   string
+	TUNAllowedCIDR string
+	VirtualIP      net.IP
+	ClientIP       net.IP
+	StatsInterval  time.Duration
+	StatsJSON      bool
+	UseTUN         bool
+	DeviceName     string
 }
 
 // RunServer starts one QUIC listener per path and blocks until ctx is canceled
@@ -55,7 +58,7 @@ func RunServer(ctx context.Context, cfg ServerConfig) error {
 		}
 	}
 
-	tlsConfig, err := serverTLSConfig(cfg.TLSCertFile, cfg.TLSKeyFile)
+	tlsConfig, err := serverTLSConfig(cfg.TLSCertFile, cfg.TLSKeyFile, cfg.ClientCAFile)
 	if err != nil {
 		return err
 	}
@@ -64,9 +67,10 @@ func RunServer(ctx context.Context, cfg ServerConfig) error {
 	defer cancel()
 
 	var counters stats.Counters
-	go stats.LogEvery(ctx, cfg.StatsInterval, &counters, log.Printf)
+	statsFormatter := statsSnapshotFormatter(cfg.StatsJSON)
+	go stats.LogEvery(ctx, cfg.StatsInterval, &counters, log.Printf, statsFormatter)
 	defer func() {
-		log.Printf("stats final: %s", counters.Snapshot())
+		log.Printf("stats final: %s", statsFormatter(counters.Snapshot()))
 	}()
 
 	if cfg.UseTUN {
@@ -100,6 +104,11 @@ func RunServer(ctx context.Context, cfg ServerConfig) error {
 }
 
 func runTUNServer(ctx context.Context, cfg ServerConfig, tlsConfig *tls.Config, counters *stats.Counters) error {
+	policy, err := newPacketPolicy(cfg.TUNAllowedCIDR)
+	if err != nil {
+		return err
+	}
+
 	device, err := tun.Open(cfg.DeviceName)
 	if err != nil {
 		return err
@@ -112,7 +121,7 @@ func runTUNServer(ctx context.Context, cfg ServerConfig, tlsConfig *tls.Config, 
 		_ = device.Close()
 	}()
 
-	session := newServerTUNSession(device, counters)
+	session := newServerTUNSession(device, counters, policy)
 	errCh := make(chan error, 3)
 	go session.forwardDevicePackets(ctx, errCh)
 
@@ -243,6 +252,12 @@ func handleTUNQUICConnection(ctx context.Context, pathID int, conn *quic.Conn, s
 			return
 		}
 
+		if !session.policy.allow(rawPacket) {
+			counters.AddDrop()
+			log.Printf("path %d dropped TUN packet length=%d: packet policy denied", pathID, len(rawPacket))
+			continue
+		}
+
 		if err := session.writeDevice(rawPacket); err != nil {
 			if ctx.Err() != nil || errors.Is(err, os.ErrClosed) {
 				return
@@ -302,16 +317,18 @@ type serverPath struct {
 type serverTUNSession struct {
 	device        packetDevice
 	counters      *stats.Counters
+	policy        packetPolicy
 	deviceWriteMu sync.Mutex
 	pathsMu       sync.Mutex
 	paths         []serverPath
 	nextPath      int
 }
 
-func newServerTUNSession(device packetDevice, counters *stats.Counters) *serverTUNSession {
+func newServerTUNSession(device packetDevice, counters *stats.Counters, policy packetPolicy) *serverTUNSession {
 	return &serverTUNSession{
 		device:   device,
 		counters: counters,
+		policy:   policy,
 	}
 }
 
@@ -379,6 +396,11 @@ func (s *serverTUNSession) forwardDevicePackets(ctx context.Context, errCh chan<
 		}
 
 		packet := append([]byte(nil), buffer[:n]...)
+		if !s.policy.allow(packet) {
+			s.counters.AddDrop()
+			log.Printf("dropped TUN packet length=%d: packet policy denied", len(packet))
+			continue
+		}
 		if err := s.writeNextPath(packet); err != nil {
 			s.counters.AddDrop()
 			log.Printf("dropped TUN packet length=%d: %v", len(packet), err)

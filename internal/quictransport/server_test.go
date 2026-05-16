@@ -3,9 +3,11 @@ package quictransport
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"testing"
 
+	"mvp-vpn-lite/internal/packet"
 	"mvp-vpn-lite/internal/stats"
 )
 
@@ -13,7 +15,7 @@ func TestServerTUNSessionWriteNextPathRoundRobin(t *testing.T) {
 	t.Parallel()
 
 	var counters stats.Counters
-	session := newServerTUNSession(&scriptedDevice{}, &counters)
+	session := newServerTUNSession(&scriptedDevice{}, &counters, packetPolicy{})
 	stream0 := &bufferStream{}
 	stream1 := &bufferStream{}
 	session.addPath(0, stream0)
@@ -51,7 +53,7 @@ func TestServerTUNSessionForwardDevicePackets(t *testing.T) {
 		cancel: cancel,
 	}
 	var counters stats.Counters
-	session := newServerTUNSession(device, &counters)
+	session := newServerTUNSession(device, &counters, packetPolicy{})
 	stream := &bufferStream{}
 	session.addPath(0, stream)
 
@@ -69,6 +71,46 @@ func TestServerTUNSessionForwardDevicePackets(t *testing.T) {
 	}
 }
 
+func TestServerTUNSessionForwardDevicePacketsDropsPacketsDeniedByPolicy(t *testing.T) {
+	t.Parallel()
+
+	rawPacket, err := packet.BuildICMPEchoRequest(net.IPv4(192, 0, 2, 10), net.IPv4(10, 8, 0, 1), 1, 1, nil)
+	if err != nil {
+		t.Fatalf("BuildICMPEchoRequest() error = %v", err)
+	}
+	policy, err := newPacketPolicy("10.8.0.0/24")
+	if err != nil {
+		t.Fatalf("newPacketPolicy() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	device := &scriptedDevice{
+		reads:  [][]byte{rawPacket},
+		cancel: cancel,
+	}
+	var counters stats.Counters
+	session := newServerTUNSession(device, &counters, policy)
+	stream := &bufferStream{}
+	session.addPath(0, stream)
+	errCh := make(chan error, 1)
+
+	session.forwardDevicePackets(ctx, errCh)
+
+	if stream.Len() != 0 {
+		t.Fatalf("stream length = %d, want 0", stream.Len())
+	}
+	snapshot := counters.Snapshot()
+	if snapshot.DroppedPackets != 1 || snapshot.TXPackets != 0 {
+		t.Fatalf("stats = %s, want 1 drop and no tx", snapshot)
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("forwardDevicePackets() unexpected error = %v", err)
+	default:
+	}
+}
+
 func TestServerTUNSessionForwardDevicePacketsRetriesNotPollableRead(t *testing.T) {
 	t.Parallel()
 
@@ -79,7 +121,7 @@ func TestServerTUNSessionForwardDevicePacketsRetriesNotPollableRead(t *testing.T
 		cancel:     cancel,
 	}
 	var counters stats.Counters
-	session := newServerTUNSession(device, &counters)
+	session := newServerTUNSession(device, &counters, packetPolicy{})
 	stream := &bufferStream{}
 	session.addPath(0, stream)
 	errCh := make(chan error, 1)

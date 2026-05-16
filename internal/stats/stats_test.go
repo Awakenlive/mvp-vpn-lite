@@ -2,6 +2,7 @@ package stats
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +55,37 @@ func TestSnapshotString(t *testing.T) {
 	for _, want := range []string{"rx=1 packets/2 bytes", "tx=3 packets/4 bytes", "dropped=5", "errors=6"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Snapshot.String() = %q, missing %q", got, want)
+		}
+	}
+}
+
+func TestJSONSnapshot(t *testing.T) {
+	t.Parallel()
+
+	snapshot := Snapshot{
+		RXPackets:      1,
+		RXBytes:        2,
+		TXPackets:      3,
+		TXBytes:        4,
+		DroppedPackets: 5,
+		Errors:         6,
+	}
+
+	got := JSONSnapshot(snapshot)
+	var decoded map[string]uint64
+	if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+		t.Fatalf("JSONSnapshot() returned invalid JSON %q: %v", got, err)
+	}
+	for key, want := range map[string]uint64{
+		"rx_packets":      1,
+		"rx_bytes":        2,
+		"tx_packets":      3,
+		"tx_bytes":        4,
+		"dropped_packets": 5,
+		"errors":          6,
+	} {
+		if decoded[key] != want {
+			t.Fatalf("JSONSnapshot()[%q] = %d, want %d", key, decoded[key], want)
 		}
 	}
 }

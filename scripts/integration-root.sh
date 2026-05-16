@@ -128,6 +128,7 @@ test_client_tun_with_synthetic_server() {
     -tun-name mvpvpn0 \
     -server0 127.0.0.1:49133 \
     -server1 127.0.0.1:49134 \
+    -tun-allow-cidr 10.8.0.0/24 \
     -stats-interval 1s \
     >"$LOG_DIR/client-tun-client.log" 2>&1 &
   client_pid="$!"
@@ -163,6 +164,7 @@ test_fault_injection_and_reconnect() {
     -tun-name mvpvpn0 \
     -server0 127.0.0.1:49233 \
     -server1 127.0.0.1:49234 \
+    -tun-allow-cidr 10.8.0.0/24 \
     -reconnect-min 200ms \
     -reconnect-max 2s \
     -stats-interval 1s \
@@ -218,6 +220,7 @@ test_full_tun_to_tun_netns() {
     -tun-name mvpvpns0 \
     -listen0 192.0.2.1:49333 \
     -listen1 192.0.2.1:49334 \
+    -tun-allow-cidr 10.8.0.0/24 \
     -stats-interval 1s \
     >"$LOG_DIR/netns-server.log" 2>&1 &
   server_pid="$!"
@@ -228,6 +231,7 @@ test_full_tun_to_tun_netns() {
     -tun-name mvpvpn0 \
     -server0 192.0.2.1:49333 \
     -server1 192.0.2.1:49334 \
+    -tun-allow-cidr 10.8.0.0/24 \
     -stats-interval 1s \
     >"$LOG_DIR/netns-client.log" 2>&1 &
   client_pid="$!"

@@ -8,27 +8,42 @@ import (
 	"os"
 )
 
-func serverTLSConfig(certFile, keyFile string) (*tls.Config, error) {
+func serverTLSConfig(certFile, keyFile, clientCAFile string) (*tls.Config, error) {
+	var cfg *tls.Config
 	if certFile == "" && keyFile == "" {
-		return generateSelfSignedTLSConfig()
-	}
-	if certFile == "" || keyFile == "" {
+		generated, err := generateSelfSignedTLSConfig()
+		if err != nil {
+			return nil, err
+		}
+		cfg = generated
+	} else if certFile == "" || keyFile == "" {
 		return nil, errors.New("both TLS cert and key files are required")
+	} else {
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load TLS key pair: %w", err)
+		}
+
+		cfg = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			NextProtos:   []string{mvpQUICALPN},
+			MinVersion:   tls.VersionTLS13,
+		}
 	}
 
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("load TLS key pair: %w", err)
+	if clientCAFile != "" {
+		clientCAs, err := loadCertPool(clientCAFile, "client CA")
+		if err != nil {
+			return nil, err
+		}
+		cfg.ClientCAs = clientCAs
+		cfg.ClientAuth = tls.RequireAndVerifyClientCert
 	}
 
-	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		NextProtos:   []string{mvpQUICALPN},
-		MinVersion:   tls.VersionTLS13,
-	}, nil
+	return cfg, nil
 }
 
-func clientTLSConfig(caFile, serverName string) (*tls.Config, error) {
+func clientTLSConfig(caFile, serverName, certFile, keyFile string) (*tls.Config, error) {
 	cfg := &tls.Config{
 		NextProtos: []string{mvpQUICALPN},
 		MinVersion: tls.VersionTLS13,
@@ -36,18 +51,37 @@ func clientTLSConfig(caFile, serverName string) (*tls.Config, error) {
 	}
 	if caFile == "" {
 		cfg.InsecureSkipVerify = true // demo mode for the ephemeral self-signed server cert
+	} else {
+		rootCAs, err := loadCertPool(caFile, "CA")
+		if err != nil {
+			return nil, err
+		}
+		cfg.RootCAs = rootCAs
+	}
+
+	if certFile == "" && keyFile == "" {
 		return cfg, nil
 	}
-
-	caPEM, err := os.ReadFile(caFile)
+	if certFile == "" || keyFile == "" {
+		return nil, errors.New("both client TLS cert and key files are required")
+	}
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
-		return nil, fmt.Errorf("read CA certificate: %w", err)
+		return nil, fmt.Errorf("load client TLS key pair: %w", err)
 	}
-	rootCAs := x509.NewCertPool()
-	if !rootCAs.AppendCertsFromPEM(caPEM) {
-		return nil, fmt.Errorf("CA certificate file %s does not contain PEM certificates", caFile)
-	}
+	cfg.Certificates = []tls.Certificate{cert}
 
-	cfg.RootCAs = rootCAs
 	return cfg, nil
+}
+
+func loadCertPool(path, label string) (*x509.CertPool, error) {
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s certificate: %w", label, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, fmt.Errorf("%s certificate file %s does not contain PEM certificates", label, path)
+	}
+	return pool, nil
 }

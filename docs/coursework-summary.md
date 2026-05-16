@@ -24,6 +24,9 @@ QUIC выбран как транспортный протокол, потому
 - работа с Linux TUN-интерфейсами;
 - восстановление упавших путей;
 - базовая телеметрия RX/TX/drop/error;
+- JSON-формат статистики для машинной обработки логов;
+- trusted TLS и mutual TLS;
+- простая packet policy для TUN-пакетов;
 - настройка через CLI-флаги и переменные окружения;
 - подготовка helper-скриптов и systemd-примеров.
 
@@ -267,15 +270,18 @@ CLI получил флаг:
 
 ```text
 -stats-interval
+-stats-json
 ```
 
 Если interval больше нуля, приложение периодически пишет snapshot в лог. При
-завершении всегда выводится финальная статистика.
+завершении всегда выводится финальная статистика. По умолчанию она выводится в
+читаемом text-формате, а с `-stats-json` - в JSON:
 
 Пример финальной строки:
 
 ```text
 stats final: rx=4 packets/160 bytes tx=4 packets/160 bytes dropped=0 errors=0
+stats final: {"rx_packets":4,"rx_bytes":160,"tx_packets":4,"tx_bytes":160,"dropped_packets":0,"errors":0}
 ```
 
 ### Этап 10. TLS-режимы
@@ -288,6 +294,8 @@ QUIC всегда использует TLS. В проекте реализова
 2. Trusted mode: сервер запускается с `-tls-cert` и `-tls-key`, клиент получает
    `-ca-cert` и optional `-server-name`. В этом режиме клиент проверяет
    сертификат сервера.
+3. Mutual TLS: сервер получает `-client-ca` и требует клиентский сертификат, а
+   клиент запускается с `-client-cert` и `-client-key`.
 
 Также задан ALPN:
 
@@ -296,6 +304,20 @@ mvp-vpn-lite
 ```
 
 Минимальная версия TLS - TLS 1.3.
+
+### Этап 10.1. Packet policy для TUN
+
+Для TUN-режима добавлен флаг:
+
+```text
+-tun-allow-cidr
+```
+
+Если он задан, endpoint проверяет каждый raw IPv4 packet перед forwarding.
+Source IP и destination IP должны входить в указанный CIDR. Malformed packets,
+non-IPv4 packets и packets за пределами CIDR drop-аются и учитываются в
+stats. Это не полноценный firewall, но это уже минимальная защита от случайного
+форвардинга чужих адресов.
 
 ### Этап 11. Reconnect и failover в TUN-клиенте
 
@@ -314,7 +336,13 @@ mvp-vpn-lite
 
 1. путь удаляется из active path set;
 2. stream/connection закрываются;
-3. текущий пакет пробуется отправить через следующий активный путь.
+3. для этого path записывается короткий cooldown;
+4. текущий пакет пробуется отправить через следующий активный путь.
+
+Cooldown нужен, чтобы только что упавший и восстановленный path не получал
+трафик сразу же, если рядом есть другой здоровый active path. Это простая
+модель health tracking: она не измеряет latency, но уменьшает flapping после
+ошибок записи.
 
 Если все пути пропали, TUN-пакеты временно drop-аются, а счетчик drops растет.
 
@@ -575,6 +603,10 @@ Packet flow:
 Завершение управляется через `context.Context`. При cancel закрываются TUN fd и
 QUIC listeners, чтобы разблокировать pending read/accept операции.
 
+Отдельно добавлен `internal/buildinfo`, который позволяет вывести версию
+клиента или сервера через `-version`. Значение версии можно заменить при сборке
+через Go `-ldflags`.
+
 ## 8. Обработка ошибок и отказоустойчивость
 
 Реализованы следующие сценарии:
@@ -584,6 +616,7 @@ QUIC listeners, чтобы разблокировать pending read/accept оп
 - если IPv4 packet malformed, demo server считает его drop;
 - если ICMP packet не echo request, demo server считает его drop;
 - если QUIC stream ломается, path удаляется;
+- если path только что ломался, он получает короткий cooldown;
 - если один path сломан, packet отправляется через следующий активный path;
 - если все paths недоступны, TUN packets drop-аются до reconnect;
 - если path отсутствует, reconnect goroutine пытается восстановить его;
@@ -603,11 +636,14 @@ QUIC listeners, чтобы разблокировать pending read/accept оп
 - frame validation;
 - round-robin scheduler;
 - TLS config;
+- mTLS socket-level QUIC smoke;
+- packet policy allow/drop;
 - TUN device name normalization;
 - env parsing;
-- stats counters;
+- stats counters и JSON-format;
 - client TUN send loop;
 - client path failover;
+- client path health cooldown;
 - all-paths-down drops;
 - reconnect backoff;
 - stream graceful close detection;
@@ -653,6 +689,9 @@ go test -count=250 ./internal/quictransport ./internal/packet ./internal/stats
 - network namespace full TUN-to-TUN tests;
 - failover через `iptables`;
 - reconnect после снятия `iptables DROP`.
+- MTU-проверку через `scripts/integration-mtu.sh`;
+- soak-проверку full TUN-to-TUN через `scripts/integration-soak.sh`;
+- CI workflow `.github/workflows/ci.yml`.
 
 ## 10. Результаты stress testing
 
@@ -685,12 +724,13 @@ Failover-сценарий:
 Проект специально оставлен MVP, поэтому у него есть ограничения:
 
 - реальный TUN mode поддержан только на Linux;
-- нет production authentication между peers;
+- production authentication ограничена mTLS и требует нормального управления
+  сертификатами;
 - demo TLS mode отключает verify при отсутствии `-ca-cert`;
-- нет NAT management;
-- нет packet policy/firewall layer;
+- нет automatic NAT management;
+- packet policy минимальная и CIDR-based, это не полноценный firewall;
 - нет маршрутизации сложных подсетей из коробки;
-- нет path quality scoring;
+- нет latency-based path quality scoring;
 - нет congestion coordination между путями;
 - нет отдельной packet retransmission/reordering логики поверх QUIC;
 - серверный demo mode отвечает только на ICMP echo request;
@@ -708,6 +748,9 @@ Failover-сценарий:
 - multipath packet scheduling;
 - обработку отказов сетевых путей;
 - reconnect с exponential backoff;
+- mutual TLS и минимальную packet policy;
+- JSON-метрики и CLI version output;
+- GitHub Actions CI;
 - системное тестирование с network namespaces;
 - подготовку приложения к запуску как systemd service;
 - отличие demo security от trusted TLS mode.
@@ -723,7 +766,8 @@ Failover-сценарий:
 синтетический ICMP demo mode и реальный Linux TUN-to-TUN mode. Добавлена
 поддержка двух QUIC-путей, round-robin распределение пакетов, удаление
 сломанных путей, reconnect с bounded backoff, TLS demo/trusted modes,
-статистика, helper-скрипты, env-конфигурация, systemd-примеры и подробная
-документация. Проект покрыт unit, script, smoke, race, stress и root/netns
+mutual TLS, packet policy, text/JSON статистика, helper-скрипты,
+env-конфигурация, systemd-примеры и подробная документация. Проект покрыт
+unit, script, smoke, race, stress, CI и root/netns
 integration проверками. В ходе stress testing была найдена и исправлена
 нестабильность Linux TUN fd, связанная с `read /dev/net/tun: not pollable`.

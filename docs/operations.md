@@ -43,11 +43,14 @@ Server variables:
 | `-listen1` | `MVPVPN_SERVER_LISTEN1` |
 | `-tls-cert` | `MVPVPN_SERVER_TLS_CERT` |
 | `-tls-key` | `MVPVPN_SERVER_TLS_KEY` |
+| `-client-ca` | `MVPVPN_SERVER_CLIENT_CA` |
 | `-virtual-ip` | `MVPVPN_SERVER_VIRTUAL_IP` |
 | `-client-ip` | `MVPVPN_SERVER_CLIENT_IP` |
 | `-stats-interval` | `MVPVPN_SERVER_STATS_INTERVAL` |
+| `-stats-json` | `MVPVPN_SERVER_STATS_JSON` |
 | `-tun` | `MVPVPN_SERVER_TUN` |
 | `-tun-name` | `MVPVPN_SERVER_TUN_NAME` |
+| `-tun-allow-cidr` | `MVPVPN_SERVER_TUN_ALLOW_CIDR` |
 
 Client variables:
 
@@ -57,6 +60,8 @@ Client variables:
 | `-server1` | `MVPVPN_CLIENT_SERVER1` |
 | `-ca-cert` | `MVPVPN_CLIENT_CA_CERT` |
 | `-server-name` | `MVPVPN_CLIENT_SERVER_NAME` |
+| `-client-cert` | `MVPVPN_CLIENT_TLS_CERT` |
+| `-client-key` | `MVPVPN_CLIENT_TLS_KEY` |
 | `-virtual-ip` | `MVPVPN_CLIENT_VIRTUAL_IP` |
 | `-client-ip` | `MVPVPN_CLIENT_CLIENT_IP` |
 | `-count` | `MVPVPN_CLIENT_COUNT` |
@@ -64,8 +69,10 @@ Client variables:
 | `-payload` | `MVPVPN_CLIENT_PAYLOAD` |
 | `-timeout` | `MVPVPN_CLIENT_TIMEOUT` |
 | `-stats-interval` | `MVPVPN_CLIENT_STATS_INTERVAL` |
+| `-stats-json` | `MVPVPN_CLIENT_STATS_JSON` |
 | `-tun` | `MVPVPN_CLIENT_TUN` |
 | `-tun-name` | `MVPVPN_CLIENT_TUN_NAME` |
+| `-tun-allow-cidr` | `MVPVPN_CLIENT_TUN_ALLOW_CIDR` |
 | `-reconnect-min` | `MVPVPN_CLIENT_RECONNECT_MIN` |
 | `-reconnect-max` | `MVPVPN_CLIENT_RECONNECT_MAX` |
 
@@ -75,7 +82,14 @@ Example environment files are in `examples/env/server.env` and
 
 The examples leave TLS verification in local demo mode. For a trusted setup,
 set `MVPVPN_SERVER_TLS_CERT` and `MVPVPN_SERVER_TLS_KEY` on the server, and set
-`MVPVPN_CLIENT_CA_CERT` plus `MVPVPN_CLIENT_SERVER_NAME` on the client.
+`MVPVPN_CLIENT_CA_CERT` plus `MVPVPN_CLIENT_SERVER_NAME` on the client. For
+mutual TLS, also set `MVPVPN_SERVER_CLIENT_CA` on the server and
+`MVPVPN_CLIENT_TLS_CERT`/`MVPVPN_CLIENT_TLS_KEY` on the client.
+
+`MVPVPN_*_TUN_ALLOW_CIDR` enables a simple IPv4 packet policy in TUN mode. When
+set, both the source and destination IP of each raw IPv4 packet must be inside
+the configured CIDR. Leave it empty if the tunnel is meant to carry routed
+subnets outside the default `10.8.0.0/24` overlay.
 
 ## Systemd
 
@@ -135,6 +149,14 @@ go vet ./...
 ./scripts/check-operational-examples.sh
 ```
 
+Root-only integration checks:
+
+```sh
+sudo ./scripts/integration-root.sh
+sudo ./scripts/integration-mtu.sh
+sudo SOAK_SECONDS=60 ./scripts/integration-soak.sh
+```
+
 ## Troubleshooting
 
 - If the TUN helper fails, run it with `DRY_RUN=1` to inspect the `ip` commands.
@@ -144,3 +166,5 @@ go vet ./...
   route and the `ROUTE` value in `/etc/mvp-vpn-lite/server.env`.
 - If a path drops, the client should log reconnect attempts with the configured
   `MVPVPN_CLIENT_RECONNECT_MIN` and `MVPVPN_CLIENT_RECONNECT_MAX` range.
+- If packets are unexpectedly dropped, check `MVPVPN_SERVER_TUN_ALLOW_CIDR` and
+  `MVPVPN_CLIENT_TUN_ALLOW_CIDR`; both endpoints enforce their own policy.

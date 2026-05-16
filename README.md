@@ -1,15 +1,18 @@
 # mvp-vpn-lite
 
+[![CI](https://github.com/AwakenLive/mvp-vpn-lite/actions/workflows/ci.yml/badge.svg)](https://github.com/AwakenLive/mvp-vpn-lite/actions/workflows/ci.yml)
+
 `mvp-vpn-lite` is a small Go prototype of a packet tunnel over QUIC. It can run
 as a synthetic ICMP demo, or pump raw IPv4 packets between Linux TUN devices on
 the client and server side.
 
 ## Current status
 
-Stage 9 is implemented: both client and server have Linux TUN modes, the TUN
-client reconnects failed QUIC paths with bounded backoff, and the command-line
-tools can be configured from environment files for systemd-style operation. The
-demo client/server still exist for quick socket-only checks.
+Stage 10 is implemented: both client and server have Linux TUN modes, the TUN
+client reconnects failed QUIC paths with bounded backoff, CI and root
+integration checks cover the important packet flows, and the command-line tools
+can be configured from environment files for systemd-style operation. The demo
+client/server still exist for quick socket-only checks.
 
 Implemented pieces:
 
@@ -20,10 +23,15 @@ Implemented pieces:
 - Round-robin scheduling across available paths.
 - Linux TUN client/server modes and idempotent setup/cleanup helper scripts.
 - RX/TX/drop/error counters with `-stats-interval`.
-- Optional server TLS cert/key files and client CA verification.
+- Optional JSON stats logs with `-stats-json`.
+- Optional server TLS cert/key files, client CA verification, and mTLS client
+  certificates.
 - TUN client path removal, packet failover, and reconnect with bounded backoff.
+- Optional IPv4 TUN packet policy with `-tun-allow-cidr`.
 - Environment-variable defaults for every command-line flag.
 - Example environment files and systemd units for client/server services.
+- GitHub Actions CI plus root-only integration scripts for real TUN, fault
+  injection, reconnect, MTU, and soak checks.
 
 Main limitations:
 
@@ -32,9 +40,22 @@ Main limitations:
   certificate verification for the server's ephemeral self-signed certificate.
 - The default server mode still answers IPv4 ICMP echo packets itself.
 - TUN server mode forwards raw IPv4 packets to the server TUN device, but there
-  is no authentication, routing policy, or NAT management yet.
-- There is no packet retransmission, reordering, or path quality scoring beyond
-  active/inactive path tracking.
+  is no automatic host-wide NAT management.
+- There is no packet retransmission, reordering, or latency-based path scoring
+  beyond active/inactive health tracking, short failure cooldown, and reconnect.
+
+## Shape
+
+```text
+client app/kernel
+      |
+      v
+  mvpvpn0 TUN
+      |
+      v
+cmd/client -- QUIC path 0 --> cmd/server -- mvpvpns0 TUN -- server kernel
+          \- QUIC path 1 -/
+```
 
 ## Requirements
 
@@ -78,6 +99,24 @@ go run ./cmd/server \
 go run ./cmd/client \
   -ca-cert ./certs/server.crt \
   -server-name localhost
+```
+
+For mutual TLS, require a client certificate on the server and provide the
+client cert/key on the client:
+
+```sh
+go run ./cmd/server \
+  -tls-cert ./certs/server.crt \
+  -tls-key ./certs/server.key \
+  -client-ca ./certs/client-ca.crt
+```
+
+```sh
+go run ./cmd/client \
+  -ca-cert ./certs/server-ca.crt \
+  -server-name server.example.com \
+  -client-cert ./certs/client.crt \
+  -client-key ./certs/client.key
 ```
 
 ## TUN-to-TUN mode
@@ -126,6 +165,9 @@ go run ./cmd/client \
   -server1 127.0.0.1:44434
 ```
 
+Add `-tun-allow-cidr 10.8.0.0/24` on either endpoint to drop raw IPv4 packets
+whose source or destination is outside the overlay CIDR.
+
 In another shell, send traffic through the configured route:
 
 ```sh
@@ -161,12 +203,16 @@ Server:
   path.
 - `-tls-cert`, `-tls-key`: PEM certificate and private key files. If omitted,
   the server generates an ephemeral demo certificate.
+- `-client-ca`: PEM CA used to verify client certificates for mTLS.
 - `-virtual-ip`: virtual server IPv4 address, default `10.8.0.1`.
 - `-client-ip`: client tunnel IPv4 address, default `10.8.0.2`.
 - `-tun`: enable server TUN packet pump mode.
 - `-tun-name`: server TUN device name, default `mvpvpns0`.
+- `-tun-allow-cidr`: optional IPv4 CIDR policy for TUN packets.
 - `-stats-interval`: periodic stats interval, default `10s`; use `0` to disable
   periodic logs.
+- `-stats-json`: write stats snapshots as JSON.
+- `-version`: print the binary version and exit.
 
 Client:
 
@@ -175,21 +221,26 @@ Client:
 - `-ca-cert`: PEM CA/server certificate used to verify the QUIC server. If
   omitted, the client uses demo insecure TLS.
 - `-server-name`: TLS server name override for certificate verification.
+- `-client-cert`, `-client-key`: PEM client certificate/key for mTLS.
 - `-count`: number of synthetic echo requests in non-TUN mode.
 - `-tun`: enable TUN packet pump mode.
 - `-tun-name`: TUN device name, default `mvpvpn0`.
+- `-tun-allow-cidr`: optional IPv4 CIDR policy for TUN packets.
 - `-reconnect-min`, `-reconnect-max`: bounded backoff range for reconnecting
   failed TUN paths, defaults `1s` and `30s`.
 - `-stats-interval`: periodic stats interval, default `10s`; use `0` to disable
   periodic logs.
+- `-stats-json`: write stats snapshots as JSON.
+- `-version`: print the binary version and exit.
 
 ## Tests
 
 ```sh
 GOCACHE=/tmp/mvp-vpn-lite-gocache GOMODCACHE=/tmp/mvp-vpn-lite-gomodcache go test ./...
+go vet ./...
 ./scripts/check-tun-scripts.sh
 ./scripts/check-operational-examples.sh
 ```
 
 More details are in `docs/testing.md`. Operational install notes are in
-`docs/operations.md`.
+`docs/operations.md`; routing and NAT notes are in `docs/routing-nat.md`.

@@ -51,8 +51,14 @@ as long-lived Linux services.
 `internal/stats`
 
 Tracks RX/TX packet and byte counts plus drops and errors. The command line
-tools can log snapshots periodically with `-stats-interval` and always log a
-final snapshot on shutdown.
+tools can log snapshots periodically with `-stats-interval`, can render those
+snapshots as JSON with `-stats-json`, and always log a final snapshot on
+shutdown.
+
+`internal/buildinfo`
+
+Stores build-time version metadata used by the `-version` flags in both
+commands.
 
 `cmd/server`
 
@@ -107,11 +113,17 @@ Closed or failed client streams are removed from the active path set, and
 outbound packets are retried on the next live path when a write fails. One
 reconnect goroutine per configured path watches the active set and redials
 missing paths with bounded backoff. The client enables QUIC keepalive packets so
-idle broken paths can be noticed by the connection idle timeout.
+idle broken paths can be noticed by the connection idle timeout. The path set
+also remembers recent write failures and gives a just-failed path a short
+cooldown after reconnect when another active path is available.
 
 The TUN server mirrors that shape: one goroutine reads from the server TUN
 device, and one receiver goroutine per accepted QUIC stream writes packets into
 the device. Server-side sends use round-robin across currently active streams.
+
+When `-tun-allow-cidr` is set, TUN packet reader and receiver paths call the
+same IPv4 policy helper before forwarding a raw packet. Denied packets are
+counted as drops and are not written to QUIC streams or TUN devices.
 
 Cancellation is driven by `context.Context`. When the context is canceled, the
 TUN file descriptor and QUIC listeners are closed to unblock pending reads.
@@ -119,7 +131,9 @@ TUN file descriptor and QUIC listeners are closed to unblock pending reads.
 ## Security notes
 
 This is an MVP transport demo, not production VPN software. The server can load
-a configured certificate/key pair and the client can verify a configured CA
-certificate. If no CA is configured, the client falls back to insecure demo mode
-for the server's ephemeral self-signed certificate. Production use would still
-need authenticated peers, replay/abuse controls, and broader packet policy.
+a configured certificate/key pair, the client can verify a configured CA
+certificate, and the server can require client certificates through `-client-ca`.
+If no CA is configured, the client falls back to insecure demo mode for the
+server's ephemeral self-signed certificate. Production use would still need
+key rotation, replay/abuse controls, stronger authorization rules, and
+deployment-specific routing/NAT policy.

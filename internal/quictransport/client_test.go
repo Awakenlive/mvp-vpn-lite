@@ -75,7 +75,7 @@ func TestSendTUNPacketsUsesRoundRobinPaths(t *testing.T) {
 	})
 	var counters stats.Counters
 
-	sendTUNPackets(ctx, device, pathSet, &counters, make(chan error, 1))
+	sendTUNPackets(ctx, device, pathSet, &counters, make(chan error, 1), packetPolicy{})
 
 	got0, err := ReadFrame(stream0)
 	if err != nil {
@@ -112,7 +112,7 @@ func TestSendTUNPacketsSkipsFailedPath(t *testing.T) {
 	})
 	var counters stats.Counters
 
-	sendTUNPackets(ctx, device, pathSet, &counters, make(chan error, 1))
+	sendTUNPackets(ctx, device, pathSet, &counters, make(chan error, 1), packetPolicy{})
 
 	got, err := ReadFrame(fallback)
 	if err != nil {
@@ -145,11 +145,50 @@ func TestSendTUNPacketsDropsWhenNoActivePath(t *testing.T) {
 	errCh := make(chan error, 1)
 	var counters stats.Counters
 
-	sendTUNPackets(ctx, device, pathSet, &counters, errCh)
+	sendTUNPackets(ctx, device, pathSet, &counters, errCh, packetPolicy{})
 
 	snapshot := counters.Snapshot()
 	if snapshot.DroppedPackets != 1 {
 		t.Fatalf("drops = %d, want 1", snapshot.DroppedPackets)
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("sendTUNPackets() unexpected error = %v", err)
+	default:
+	}
+}
+
+func TestSendTUNPacketsDropsPacketsDeniedByPolicy(t *testing.T) {
+	t.Parallel()
+
+	rawPacket, err := packet.BuildICMPEchoRequest(net.IPv4(192, 0, 2, 10), net.IPv4(10, 8, 0, 1), 1, 1, nil)
+	if err != nil {
+		t.Fatalf("BuildICMPEchoRequest() error = %v", err)
+	}
+	policy, err := newPacketPolicy("10.8.0.0/24")
+	if err != nil {
+		t.Fatalf("newPacketPolicy() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	device := &scriptedDevice{
+		reads:  [][]byte{rawPacket},
+		cancel: cancel,
+	}
+	stream := &bufferStream{}
+	pathSet := newClientPathSet([]clientPath{{id: 0, stream: stream}})
+	errCh := make(chan error, 1)
+	var counters stats.Counters
+
+	sendTUNPackets(ctx, device, pathSet, &counters, errCh, policy)
+
+	if stream.Len() != 0 {
+		t.Fatalf("stream length = %d, want 0", stream.Len())
+	}
+	snapshot := counters.Snapshot()
+	if snapshot.DroppedPackets != 1 || snapshot.TXPackets != 0 {
+		t.Fatalf("stats = %s, want 1 drop and no tx", snapshot)
 	}
 
 	select {
@@ -173,7 +212,7 @@ func TestSendTUNPacketsRetriesNotPollableRead(t *testing.T) {
 	errCh := make(chan error, 1)
 	var counters stats.Counters
 
-	sendTUNPackets(ctx, device, pathSet, &counters, errCh)
+	sendTUNPackets(ctx, device, pathSet, &counters, errCh, packetPolicy{})
 
 	got, err := ReadFrame(stream)
 	if err != nil {
@@ -190,6 +229,54 @@ func TestSendTUNPacketsRetriesNotPollableRead(t *testing.T) {
 	select {
 	case err := <-errCh:
 		t.Fatalf("sendTUNPackets() unexpected fatal error = %v", err)
+	default:
+	}
+}
+
+func TestReceivePathPacketsDropsPacketsDeniedByPolicy(t *testing.T) {
+	t.Parallel()
+
+	rawPacket, err := packet.BuildICMPEchoRequest(net.IPv4(192, 0, 2, 10), net.IPv4(10, 8, 0, 1), 1, 1, nil)
+	if err != nil {
+		t.Fatalf("BuildICMPEchoRequest() error = %v", err)
+	}
+	policy, err := newPacketPolicy("10.8.0.0/24")
+	if err != nil {
+		t.Fatalf("newPacketPolicy() error = %v", err)
+	}
+
+	stream := &bufferStream{}
+	if err := WriteFrame(stream, rawPacket); err != nil {
+		t.Fatalf("WriteFrame() error = %v", err)
+	}
+	device := &scriptedDevice{}
+	errCh := make(chan error, 1)
+	var counters stats.Counters
+	pathSet := newClientPathSet([]clientPath{{id: 0, stream: stream}})
+
+	done := make(chan struct{})
+	go func() {
+		receivePathPackets(context.Background(), clientPath{id: 0, stream: stream}, device, &sync.Mutex{}, pathSet, &counters, errCh, policy)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("receivePathPackets() did not return after graceful EOF")
+	}
+
+	if writes := device.Writes(); len(writes) != 0 {
+		t.Fatalf("device writes = %d, want 0", len(writes))
+	}
+	snapshot := counters.Snapshot()
+	if snapshot.DroppedPackets != 1 || snapshot.RXPackets != 0 {
+		t.Fatalf("stats = %s, want 1 drop and no rx", snapshot)
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("receivePathPackets() unexpected error = %v", err)
 	default:
 	}
 }
@@ -221,6 +308,39 @@ func TestClientPathSetAddReplacesPath(t *testing.T) {
 	}
 }
 
+func TestClientPathSetSkipsCoolingDownPathWhenAlternativeIsActive(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(100, 0)
+	stream0 := &bufferStream{}
+	stream1 := &bufferStream{}
+	pathSet := newClientPathSet([]clientPath{
+		{id: 0, stream: stream0},
+		{id: 1, stream: stream1},
+	})
+	pathSet.now = func() time.Time {
+		return now
+	}
+	pathSet.markFailure(0)
+
+	path, err := pathSet.nextPath()
+	if err != nil {
+		t.Fatalf("nextPath() error = %v", err)
+	}
+	if path.id != 1 {
+		t.Fatalf("nextPath() during cooldown id = %d, want 1", path.id)
+	}
+
+	now = now.Add(clientPathCooldown(1) + time.Millisecond)
+	path, err = pathSet.nextPath()
+	if err != nil {
+		t.Fatalf("nextPath() after cooldown error = %v", err)
+	}
+	if path.id != 0 {
+		t.Fatalf("nextPath() after cooldown id = %d, want 0", path.id)
+	}
+}
+
 func TestReceivePathPacketsWritesToTUNDevice(t *testing.T) {
 	t.Parallel()
 
@@ -235,7 +355,7 @@ func TestReceivePathPacketsWritesToTUNDevice(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		receivePathPackets(context.Background(), clientPath{id: 0, stream: stream}, device, &sync.Mutex{}, pathSet, &counters, errCh)
+		receivePathPackets(context.Background(), clientPath{id: 0, stream: stream}, device, &sync.Mutex{}, pathSet, &counters, errCh, packetPolicy{})
 		close(done)
 	}()
 
@@ -274,7 +394,7 @@ func TestReceivePathPacketsRemovesFailedPathWithoutFatalError(t *testing.T) {
 	var counters stats.Counters
 	pathSet := newClientPathSet([]clientPath{{id: 0, stream: stream}})
 
-	receivePathPackets(context.Background(), clientPath{id: 0, stream: stream}, &scriptedDevice{}, &sync.Mutex{}, pathSet, &counters, errCh)
+	receivePathPackets(context.Background(), clientPath{id: 0, stream: stream}, &scriptedDevice{}, &sync.Mutex{}, pathSet, &counters, errCh, packetPolicy{})
 
 	if active := pathSet.len(); active != 0 {
 		t.Fatalf("active paths = %d, want 0", active)

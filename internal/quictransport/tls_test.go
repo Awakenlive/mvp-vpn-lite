@@ -17,7 +17,7 @@ import (
 func TestClientTLSConfigDefaultsToDemoInsecureMode(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := clientTLSConfig("", "")
+	cfg, err := clientTLSConfig("", "", "", "")
 	if err != nil {
 		t.Fatalf("clientTLSConfig() error = %v", err)
 	}
@@ -38,7 +38,7 @@ func TestClientTLSConfigLoadsCAFile(t *testing.T) {
 		t.Fatalf("WriteFile(cert) error = %v", err)
 	}
 
-	cfg, err := clientTLSConfig(certFile, "localhost")
+	cfg, err := clientTLSConfig(certFile, "localhost", "", "")
 	if err != nil {
 		t.Fatalf("clientTLSConfig() error = %v", err)
 	}
@@ -56,11 +56,22 @@ func TestClientTLSConfigLoadsCAFile(t *testing.T) {
 func TestServerTLSConfigRejectsPartialFiles(t *testing.T) {
 	t.Parallel()
 
-	if _, err := serverTLSConfig("server.crt", ""); err == nil {
+	if _, err := serverTLSConfig("server.crt", "", ""); err == nil {
 		t.Fatal("serverTLSConfig(cert only) error = nil, want error")
 	}
-	if _, err := serverTLSConfig("", "server.key"); err == nil {
+	if _, err := serverTLSConfig("", "server.key", ""); err == nil {
 		t.Fatal("serverTLSConfig(key only) error = nil, want error")
+	}
+}
+
+func TestClientTLSConfigRejectsPartialClientCertificate(t *testing.T) {
+	t.Parallel()
+
+	if _, err := clientTLSConfig("", "", "client.crt", ""); err == nil {
+		t.Fatal("clientTLSConfig(cert only) error = nil, want error")
+	}
+	if _, err := clientTLSConfig("", "", "", "client.key"); err == nil {
+		t.Fatal("clientTLSConfig(key only) error = nil, want error")
 	}
 }
 
@@ -78,7 +89,7 @@ func TestServerTLSConfigLoadsKeyPair(t *testing.T) {
 		t.Fatalf("WriteFile(key) error = %v", err)
 	}
 
-	cfg, err := serverTLSConfig(certFile, keyFile)
+	cfg, err := serverTLSConfig(certFile, keyFile, "")
 	if err != nil {
 		t.Fatalf("serverTLSConfig() error = %v", err)
 	}
@@ -87,6 +98,59 @@ func TestServerTLSConfigLoadsKeyPair(t *testing.T) {
 	}
 	if len(cfg.NextProtos) != 1 || cfg.NextProtos[0] != mvpQUICALPN {
 		t.Fatalf("NextProtos = %v, want %s", cfg.NextProtos, mvpQUICALPN)
+	}
+}
+
+func TestClientTLSConfigLoadsClientCertificate(t *testing.T) {
+	t.Parallel()
+
+	certPEM, keyPEM := generateTestCertificatePEM(t)
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "client.crt")
+	keyFile := filepath.Join(dir, "client.key")
+	if err := os.WriteFile(certFile, certPEM, 0o600); err != nil {
+		t.Fatalf("WriteFile(cert) error = %v", err)
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
+		t.Fatalf("WriteFile(key) error = %v", err)
+	}
+
+	cfg, err := clientTLSConfig("", "", certFile, keyFile)
+	if err != nil {
+		t.Fatalf("clientTLSConfig() error = %v", err)
+	}
+	if len(cfg.Certificates) != 1 {
+		t.Fatalf("Certificates = %d, want 1", len(cfg.Certificates))
+	}
+}
+
+func TestServerTLSConfigLoadsClientCA(t *testing.T) {
+	t.Parallel()
+
+	certPEM, keyPEM := generateTestCertificatePEM(t)
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "server.crt")
+	keyFile := filepath.Join(dir, "server.key")
+	caFile := filepath.Join(dir, "client-ca.crt")
+	if err := os.WriteFile(certFile, certPEM, 0o600); err != nil {
+		t.Fatalf("WriteFile(cert) error = %v", err)
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
+		t.Fatalf("WriteFile(key) error = %v", err)
+	}
+	if err := os.WriteFile(caFile, certPEM, 0o600); err != nil {
+		t.Fatalf("WriteFile(ca) error = %v", err)
+	}
+
+	cfg, err := serverTLSConfig(certFile, keyFile, caFile)
+	if err != nil {
+		t.Fatalf("serverTLSConfig() error = %v", err)
+	}
+	if cfg.ClientCAs == nil {
+		t.Fatal("ClientCAs = nil, want loaded pool")
+	}
+	if cfg.ClientAuth == 0 {
+		t.Fatal("ClientAuth = 0, want client certificate verification")
 	}
 }
 
@@ -102,9 +166,10 @@ func generateTestCertificatePEM(t *testing.T) ([]byte, []byte) {
 		Subject:               pkix.Name{CommonName: "localhost"},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(time.Hour),
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,
+		IsCA:                  true,
 		DNSNames:              []string{"localhost"},
 		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},
 	}

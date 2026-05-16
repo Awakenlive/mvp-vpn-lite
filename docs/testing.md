@@ -19,15 +19,20 @@ GOCACHE=/tmp/mvp-vpn-lite-gocache GOMODCACHE=/tmp/mvp-vpn-lite-gomodcache go tes
 - Client path failover when a TUN write hits a failed QUIC stream.
 - TUN client reconnect backoff, active path replacement, and all-paths-down
   packet drops.
+- Client path health cooldown after write failures.
 - Server TUN session path selection and device forwarding helpers.
-- Packet stats counters and formatting.
-- TLS config loading for server cert/key files and client CA files.
+- TUN packet policy allow/drop behavior on client and server forwarding paths.
+- Packet stats counters plus text and JSON formatting.
+- TLS config loading for server cert/key files, client CA files, and client
+  certificate/key pairs.
+- A socket-level mTLS client/server smoke test over QUIC.
 - TUN helper command rendering through `DRY_RUN=1`.
 - Environment-variable parsing for command defaults.
 - Operational example shape for env files and systemd units.
 - Root integration coverage with real Linux TUN devices, network fault
   injection, end-to-end reconnect, and full TUN-to-TUN traffic inside network
   namespaces.
+- MTU and short soak root integration coverage.
 
 ## Smoke test without TUN
 
@@ -155,7 +160,34 @@ Expected result:
 [integration-root] PASS
 ```
 
-NAT and packet-policy behavior remain outside the current MVP feature set, so
-there is no product behavior to validate there yet. The integration script does
-verify that the temporary fault-injection rule is removed and that the helper
-scripts do not leave test TUN devices or namespaces behind.
+## MTU and soak checks
+
+The MTU script checks real client TUN forwarding with multiple payload sizes
+and `ping -M do`, which catches accidental fragmentation or frame-size
+regressions:
+
+```sh
+sudo ./scripts/integration-mtu.sh
+```
+
+The soak script runs a full TUN-to-TUN setup in network namespaces and sends
+continuous ping traffic for `SOAK_SECONDS`:
+
+```sh
+sudo SOAK_SECONDS=60 ./scripts/integration-soak.sh
+```
+
+Both scripts write logs under `/tmp` and fail if packet loss, TUN read errors,
+or missing TUN traffic are observed.
+
+## Remaining gaps
+
+NAT is documented in `docs/routing-nat.md`, but there is no automatic NAT
+feature in the product and therefore no automatic NAT behavior test. The root
+scripts do verify that temporary firewall rules used for fault injection are
+removed and that test TUN devices and namespaces are cleaned up.
+
+Latency-based path quality scoring, packet reordering, and retransmission above
+QUIC are also outside the MVP. Current tests cover active/inactive path health,
+failure cooldown, path removal, reconnect, and traffic continuing over a
+surviving path.

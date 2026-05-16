@@ -37,6 +37,9 @@ type ClientConfig struct {
 	Server1        string
 	CAFile         string
 	ServerName     string
+	ClientCertFile string
+	ClientKeyFile  string
+	TUNAllowedCIDR string
 	VirtualIP      net.IP
 	ClientIP       net.IP
 	Identifier     uint16
@@ -44,6 +47,7 @@ type ClientConfig struct {
 	Payload        []byte
 	RequestTimeout time.Duration
 	StatsInterval  time.Duration
+	StatsJSON      bool
 }
 
 // TUNClientConfig contains the remote addresses and local TUN device used by
@@ -53,8 +57,12 @@ type TUNClientConfig struct {
 	Server1              string
 	CAFile               string
 	ServerName           string
+	ClientCertFile       string
+	ClientKeyFile        string
+	TUNAllowedCIDR       string
 	DeviceName           string
 	StatsInterval        time.Duration
+	StatsJSON            bool
 	ReconnectMinInterval time.Duration
 	ReconnectMaxInterval time.Duration
 }
@@ -80,7 +88,7 @@ func RunClient(ctx context.Context, cfg ClientConfig) error {
 		cfg.RequestTimeout = defaultClientRequestTimeout
 	}
 
-	tlsConfig, err := clientTLSConfig(cfg.CAFile, cfg.ServerName)
+	tlsConfig, err := clientTLSConfig(cfg.CAFile, cfg.ServerName, cfg.ClientCertFile, cfg.ClientKeyFile)
 	if err != nil {
 		return err
 	}
@@ -99,9 +107,10 @@ func RunClient(ctx context.Context, cfg ClientConfig) error {
 	var counters stats.Counters
 	ctx, cancelStats := context.WithCancel(ctx)
 	defer cancelStats()
-	go stats.LogEvery(ctx, cfg.StatsInterval, &counters, log.Printf)
+	statsFormatter := statsSnapshotFormatter(cfg.StatsJSON)
+	go stats.LogEvery(ctx, cfg.StatsInterval, &counters, log.Printf, statsFormatter)
 	defer func() {
-		log.Printf("stats final: %s", counters.Snapshot())
+		log.Printf("stats final: %s", statsFormatter(counters.Snapshot()))
 	}()
 
 	payload := append([]byte(nil), cfg.Payload...)
@@ -154,6 +163,10 @@ func RunTUNClient(ctx context.Context, cfg TUNClientConfig) error {
 	if err != nil {
 		return err
 	}
+	policy, err := newPacketPolicy(cfg.TUNAllowedCIDR)
+	if err != nil {
+		return err
+	}
 
 	device, err := tun.Open(cfg.DeviceName)
 	if err != nil {
@@ -162,7 +175,7 @@ func RunTUNClient(ctx context.Context, cfg TUNClientConfig) error {
 	defer device.Close()
 	log.Printf("opened TUN device %s", device.Name())
 
-	tlsConfig, err := clientTLSConfig(cfg.CAFile, cfg.ServerName)
+	tlsConfig, err := clientTLSConfig(cfg.CAFile, cfg.ServerName, cfg.ClientCertFile, cfg.ClientKeyFile)
 	if err != nil {
 		return err
 	}
@@ -170,9 +183,10 @@ func RunTUNClient(ctx context.Context, cfg TUNClientConfig) error {
 	var counters stats.Counters
 	ctx, cancelStats := context.WithCancel(ctx)
 	defer cancelStats()
-	go stats.LogEvery(ctx, cfg.StatsInterval, &counters, log.Printf)
+	statsFormatter := statsSnapshotFormatter(cfg.StatsJSON)
+	go stats.LogEvery(ctx, cfg.StatsInterval, &counters, log.Printf, statsFormatter)
 	defer func() {
-		log.Printf("stats final: %s", counters.Snapshot())
+		log.Printf("stats final: %s", statsFormatter(counters.Snapshot()))
 	}()
 
 	pathSpecs := clientPathSpecs(cfg.Server0, cfg.Server1)
@@ -187,7 +201,7 @@ func RunTUNClient(ctx context.Context, cfg TUNClientConfig) error {
 		minDelay:  reconnectMin,
 		maxDelay:  reconnectMax,
 	}
-	return pumpTUN(ctx, device, paths, &counters, reconnect)
+	return pumpTUN(ctx, device, paths, &counters, reconnect, policy)
 }
 
 type clientPathSpec struct {
@@ -287,14 +301,23 @@ type packetDevice interface {
 }
 
 type clientPathSet struct {
-	mu    sync.Mutex
-	paths []clientPath
-	next  int
+	mu     sync.Mutex
+	paths  []clientPath
+	next   int
+	health map[int]clientPathHealth
+	now    func() time.Time
+}
+
+type clientPathHealth struct {
+	consecutiveFailures uint64
+	cooldownUntil       time.Time
 }
 
 func newClientPathSet(paths []clientPath) *clientPathSet {
 	return &clientPathSet{
-		paths: append([]clientPath(nil), paths...),
+		paths:  append([]clientPath(nil), paths...),
+		health: make(map[int]clientPathHealth),
+		now:    time.Now,
 	}
 }
 
@@ -321,8 +344,20 @@ func (s *clientPathSet) nextPath() (clientPath, error) {
 		return clientPath{}, errors.New("no active QUIC paths")
 	}
 
-	path := s.paths[s.next%len(s.paths)]
-	s.next = (s.next + 1) % len(s.paths)
+	start := s.next % len(s.paths)
+	index := start
+	now := s.now()
+	for i := 0; i < len(s.paths); i++ {
+		candidateIndex := (start + i) % len(s.paths)
+		candidate := s.paths[candidateIndex]
+		if !s.health[candidate.id].isCoolingDown(now) {
+			index = candidateIndex
+			break
+		}
+	}
+
+	path := s.paths[index]
+	s.next = (index + 1) % len(s.paths)
 	return path, nil
 }
 
@@ -357,6 +392,24 @@ func (s *clientPathSet) hasPathID(pathID int) bool {
 	return false
 }
 
+func (s *clientPathSet) markSuccess(pathID int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.health, pathID)
+}
+
+func (s *clientPathSet) markFailure(pathID int) clientPathHealth {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	health := s.health[pathID]
+	health.consecutiveFailures++
+	health.cooldownUntil = s.now().Add(clientPathCooldown(health.consecutiveFailures))
+	s.health[pathID] = health
+	return health
+}
+
 func (s *clientPathSet) len() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -371,6 +424,20 @@ func (s *clientPathSet) snapshot() []clientPath {
 	return append([]clientPath(nil), s.paths...)
 }
 
+func (h clientPathHealth) isCoolingDown(now time.Time) bool {
+	return !h.cooldownUntil.IsZero() && now.Before(h.cooldownUntil)
+}
+
+func clientPathCooldown(consecutiveFailures uint64) time.Duration {
+	if consecutiveFailures == 0 {
+		return 0
+	}
+	if consecutiveFailures > 5 {
+		consecutiveFailures = 5
+	}
+	return time.Second << (consecutiveFailures - 1)
+}
+
 type clientReconnectConfig struct {
 	pathSpecs []clientPathSpec
 	tlsConfig *tls.Config
@@ -378,7 +445,7 @@ type clientReconnectConfig struct {
 	maxDelay  time.Duration
 }
 
-func pumpTUN(ctx context.Context, device packetDevice, paths []clientPath, counters *stats.Counters, reconnect *clientReconnectConfig) error {
+func pumpTUN(ctx context.Context, device packetDevice, paths []clientPath, counters *stats.Counters, reconnect *clientReconnectConfig, policy packetPolicy) error {
 	ctx, cancel := context.WithCancel(ctx)
 
 	errCh := make(chan error, maxTUNClientErrors(paths, reconnect)+1)
@@ -395,14 +462,14 @@ func pumpTUN(ctx context.Context, device packetDevice, paths []clientPath, count
 
 	var deviceWriteMu sync.Mutex
 	for _, path := range paths {
-		go receivePathPackets(ctx, path, device, &deviceWriteMu, pathSet, counters, errCh)
+		go receivePathPackets(ctx, path, device, &deviceWriteMu, pathSet, counters, errCh, policy)
 	}
 	if reconnect != nil {
 		for _, spec := range reconnect.pathSpecs {
-			go reconnectClientPath(ctx, spec, reconnect.tlsConfig, reconnect.minDelay, reconnect.maxDelay, device, &deviceWriteMu, pathSet, counters, errCh)
+			go reconnectClientPath(ctx, spec, reconnect.tlsConfig, reconnect.minDelay, reconnect.maxDelay, device, &deviceWriteMu, pathSet, counters, errCh, policy)
 		}
 	}
-	go sendTUNPackets(ctx, device, pathSet, counters, errCh)
+	go sendTUNPackets(ctx, device, pathSet, counters, errCh, policy)
 
 	select {
 	case <-ctx.Done():
@@ -420,7 +487,7 @@ func maxTUNClientErrors(paths []clientPath, reconnect *clientReconnectConfig) in
 	return len(paths)
 }
 
-func sendTUNPackets(ctx context.Context, device packetDevice, pathSet *clientPathSet, counters *stats.Counters, errCh chan<- error) {
+func sendTUNPackets(ctx context.Context, device packetDevice, pathSet *clientPathSet, counters *stats.Counters, errCh chan<- error, policy packetPolicy) {
 	buffer := make([]byte, MaxFrameSize)
 	retryableReadErrors := 0
 	for {
@@ -450,6 +517,11 @@ func sendTUNPackets(ctx context.Context, device packetDevice, pathSet *clientPat
 		}
 
 		packet := append([]byte(nil), buffer[:n]...)
+		if !policy.allow(packet) {
+			counters.AddDrop()
+			log.Printf("dropped TUN packet length=%d: packet policy denied", len(packet))
+			continue
+		}
 		for {
 			path, err := pathSet.nextPath()
 			if err != nil {
@@ -460,12 +532,14 @@ func sendTUNPackets(ctx context.Context, device packetDevice, pathSet *clientPat
 
 			if err := WriteFrame(path.stream, packet); err != nil {
 				counters.AddError()
+				health := pathSet.markFailure(path.id)
 				if removed, ok := pathSet.remove(path.stream); ok {
 					closeClientPath(removed)
-					log.Printf("path %d removed after write error: %v; active paths=%d", removed.id, err, pathSet.len())
+					log.Printf("path %d removed after write error: %v; active paths=%d cooldown=%s failures=%d", removed.id, err, pathSet.len(), time.Until(health.cooldownUntil).Round(time.Millisecond), health.consecutiveFailures)
 				}
 				continue
 			}
+			pathSet.markSuccess(path.id)
 			counters.AddTX(len(packet))
 			log.Printf("path %d sent TUN packet length=%d", path.id, len(packet))
 			break
@@ -473,7 +547,7 @@ func sendTUNPackets(ctx context.Context, device packetDevice, pathSet *clientPat
 	}
 }
 
-func receivePathPackets(ctx context.Context, path clientPath, device packetDevice, deviceWriteMu *sync.Mutex, pathSet *clientPathSet, counters *stats.Counters, errCh chan<- error) {
+func receivePathPackets(ctx context.Context, path clientPath, device packetDevice, deviceWriteMu *sync.Mutex, pathSet *clientPathSet, counters *stats.Counters, errCh chan<- error, policy packetPolicy) {
 	defer func() {
 		if removed, ok := pathSet.remove(path.stream); ok {
 			closeClientPath(removed)
@@ -490,6 +564,12 @@ func receivePathPackets(ctx context.Context, path clientPath, device packetDevic
 			counters.AddError()
 			log.Printf("path %d read packet: %v", path.id, err)
 			return
+		}
+
+		if !policy.allow(rawPacket) {
+			counters.AddDrop()
+			log.Printf("path %d dropped TUN packet length=%d: packet policy denied", path.id, len(rawPacket))
+			continue
 		}
 
 		deviceWriteMu.Lock()
@@ -520,6 +600,7 @@ func reconnectClientPath(
 	pathSet *clientPathSet,
 	counters *stats.Counters,
 	errCh chan<- error,
+	policy packetPolicy,
 ) {
 	backoff := newReconnectBackoff(minDelay, maxDelay)
 
@@ -553,7 +634,7 @@ func reconnectClientPath(
 			closeClientPath(old)
 		}
 		log.Printf("path %d reconnected to %s; active paths=%d", path.id, path.address, pathSet.len())
-		go receivePathPackets(ctx, path, device, deviceWriteMu, pathSet, counters, errCh)
+		go receivePathPackets(ctx, path, device, deviceWriteMu, pathSet, counters, errCh, policy)
 	}
 }
 

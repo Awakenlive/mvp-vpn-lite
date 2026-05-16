@@ -11,6 +11,8 @@ sequence of length-prefixed raw IPv4 packets.
   ephemeral self-signed certificate generated at startup
 - Client verification: enabled when `-ca-cert` is provided; otherwise disabled
   for local demo mode
+- Mutual TLS: enabled when the server is started with `-client-ca` and the
+  client is started with `-client-cert`/`-client-key`
 
 Each configured path is a separate QUIC connection. The client opens one stream
 on each connection and sends packet frames on that stream. In server TUN mode,
@@ -60,11 +62,16 @@ stats.
 ## TUN mode
 
 In TUN mode, the QUIC frame payload is treated as a raw IPv4 packet. The client
-and server do not inspect or rewrite the packet before writing it to their local
-TUN device. The helper scripts configure the local TUN addresses and routes
-needed for the default `10.8.0.1`/`10.8.0.2` check, including an optional
-server-side route. Packet filtering, NAT, and policy enforcement are outside the
-current MVP.
+and server do not rewrite the packet before writing it to their local TUN
+device. The helper scripts configure the local TUN addresses and routes needed
+for the default `10.8.0.1`/`10.8.0.2` check, including an optional server-side
+route.
+
+If `-tun-allow-cidr` is set, the endpoint performs a small IPv4 policy check
+before forwarding a TUN packet. Both the source and destination IP addresses in
+the raw IPv4 header must be inside that CIDR. Non-IPv4, malformed, or
+out-of-CIDR packets are dropped and counted as drops. NAT and host-wide routing
+policy are still deployment concerns, not QUIC frame protocol features.
 
 ## Multipath behavior
 
@@ -72,11 +79,13 @@ The client creates path 0 from `server0` and path 1 from `server1` when the
 addresses are provided. Packet sends use round-robin path selection across the
 connected paths.
 
-TUN mode removes closed or failed streams from the active path set, retries a
-packet write on the next active path, and redials missing configured paths with
-bounded exponential backoff. If all paths are down, outbound TUN packets are
-dropped until at least one path reconnects.
+TUN mode removes closed or failed streams from the active path set, gives a
+recently failed path a short cooldown, retries a packet write on the next active
+path, and redials missing configured paths with bounded exponential backoff.
+This active/inactive membership plus cooldown is the current path health model.
+If all paths are down, outbound TUN packets are dropped until at least one path
+reconnects.
 
-There is no packet retransmission above QUIC, path quality scoring, congestion
-coordination, or packet reordering logic in the MVP. Reliability is left to QUIC
-streams on each individual path.
+There is no packet retransmission above QUIC, latency-based path quality
+scoring, congestion coordination, or packet reordering logic in the MVP.
+Reliability is left to QUIC streams on each individual path.
